@@ -130,8 +130,10 @@ h1 em { font-style: italic; color: var(--claret); }
 .body { min-width: 0; }
 .line { display: flex; align-items: flex-end; align-items: last baseline; gap: 8px; }
 .title { min-width: 0; overflow-wrap: anywhere; }
-.producer { font-weight: 600; }
-.cuvee { font-family: var(--display); font-style: italic; font-size: 1.1rem; }
+/* Everywhere a bottle is named: producer in the sans, wine name in the italic serif. */
+.producer { font-family: var(--body); font-weight: 600; font-style: normal; }
+.wname { font-family: var(--display); font-style: italic; font-weight: 500; }
+.cuvee { font-size: 1.1rem; }
 .qty { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--claret); white-space: nowrap; }
 .dots { flex: 1 1 24px; min-width: 24px; border-bottom: 2px dotted var(--rule); transform: translateY(-.3em); }
 .price { font-variant-numeric: tabular-nums; font-weight: 500; white-space: nowrap; }
@@ -149,7 +151,7 @@ h1 em { font-style: italic; color: var(--claret); }
 .pill.hold { color: var(--hold); }
 .pill.late { color: var(--late); }
 .pill.hidden { color: var(--muted); border-style: dashed; }
-.notes { font-family: var(--display); font-style: italic; font-size: 1rem; margin: 8px 0 0; max-width: 60ch; }
+.notes { font-size: .92rem; color: var(--muted); margin: 8px 0 0; max-width: 60ch; }
 /* Consumed bottles open a tasting card, so the list just shows a one-line preview of the notes. */
 /* Consumed bottles: the whole row lights up in a pale wash of the wine's colour on hover. */
 .entry.consumed { cursor: pointer; --tone: var(--claret); margin: 0 -12px; padding-left: 12px; padding-right: 12px; border-radius: 6px; transition: background-color .15s; }
@@ -224,9 +226,8 @@ details[open] summary { margin-bottom: 12px; }
 .form-error { color: var(--late); font-size: .88rem; margin: 0; }
 .form-error:empty { display: none; }
 
-/* ✨ Fill in with AI, at the top of the Add dialog */
+/* ✨ Fill in with AI: on phones the button sits at the bottom left of the Add dialog, its panel just above */
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-.ed-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ai-toggle, .ai-cam {
   display: inline-grid; place-items: center; flex: none; width: 40px; height: 40px; cursor: pointer;
   border: 1px solid var(--rule); border-radius: 50%; background: var(--paper); color: var(--claret);
@@ -247,11 +248,19 @@ details[open] summary { margin-bottom: 12px; }
 .ai-status:empty { display: none; }
 .ai-status.error { color: var(--late); }
 .ai-status .linkbtn { margin-left: 4px; }
+/* On wider screens the button sits beside the title instead, with the panel under the title. */
+@media (min-width: 521px) {
+  #ed-form { position: relative; }
+  #ed-form > h3 { order: -2; padding-right: 52px; }
+  #ed-form > .ai-panel { order: -1; }
+  #ai-toggle { position: absolute; top: 18px; right: 22px; }
+}
 
 /* Tasting card */
 #ts-body { display: grid; gap: 12px; }
 #ts-body .eyebrow { margin: 0; }
-#ts-body h3 em { font-style: italic; font-size: .8em; }
+#ts-body h3 .producer { font-size: .78em; }
+#ts-body h3 .wname { font-size: .8em; }
 .ts-vin { color: var(--claret); }
 .ts-rating { font-family: var(--display); font-size: 2.6rem; line-height: 1; margin: 2px 0; }
 .ts-rating small { font-family: var(--body); font-size: .9rem; color: var(--muted); }
@@ -259,7 +268,7 @@ details[open] summary { margin-bottom: 12px; }
 .ts-facts dt { color: var(--muted); }
 .ts-facts dd { margin: 0; }
 .ts-notes {
-  font-family: var(--display); font-style: italic; font-size: 1.12rem; line-height: 1.55; white-space: pre-wrap;
+  font-size: 1rem; line-height: 1.6; white-space: pre-wrap;
   margin: 0; padding-top: 14px; border-top: 1px solid var(--rule); overflow-wrap: anywhere;
 }
 

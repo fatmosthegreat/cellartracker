@@ -26,7 +26,7 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-23.13';
+const BUILD = '2026-11-23.14';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
@@ -849,6 +849,13 @@ function relayTelegram_(req) {
 // The commands listed for a guest (look-ups only) or for you (everything).
 function menuCommands_(guest) {
   return Object.keys(TG_COMMANDS).filter(function (c) { return TG_COMMANDS[c].menu && !(guest && TG_COMMANDS[c].owner); });
+}
+
+// Run from the editor after a new command is added, so Telegram's / menu lists it.
+function updateBotMenu() {
+  telegramConfig_();
+  setBotCommands_();
+  Logger.log('Menu updated. If Telegram still shows the old one, close and reopen the chat.');
 }
 
 // Everyone sees the look-up commands in the menu; your chat also sees the ones that change things.

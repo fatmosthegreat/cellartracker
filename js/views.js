@@ -142,7 +142,7 @@ export function historyHTML(consumed, now = new Date(), currency = "") {
       .map(([name, n]) => `${esc(name)} <small>${n}</small>`).join(" · ");
   };
   const facts = [
-    best ? ["Best bottle", `<button type="button" class="linkbtn" data-act="view" data-id="${esc(best.id)}">${esc(best.vintage || "NV")} ${esc(best.producer)} ${esc(best.wine)}</button> <small>${esc(best.rating)}/10</small>`] : null,
+    best ? ["Best bottle", `<button type="button" class="linkbtn" data-act="view" data-id="${esc(best.id)}">${esc(best.vintage || "NV")} <span class="producer">${esc(best.producer)}</span> <span class="wname">${esc(best.wine)}</span></button> <small>${esc(best.rating)}/10</small>`] : null,
     ["Top producers", top("producer")],
     ["Top grapes", top("grape")],
   ].filter(f => f && f[1]);
@@ -166,7 +166,7 @@ export function tastingHTML(w, currency = "", lists = FALLBACK_LISTS) {
     ["Grape", [w.grape, w.colour].filter(Boolean).join(" · ")],
   ].filter(f => f[1]);
   return `<p class="eyebrow">Tasting card</p>
-    <h3 id="ts-title"><span class="ts-vin" data-tone="${toneOf(w.colour, lists)}">${esc(w.vintage || "NV")}</span> ${esc(w.producer)}<br><em>${esc(w.wine)}</em></h3>
+    <h3 id="ts-title"><span class="ts-vin" data-tone="${toneOf(w.colour, lists)}">${esc(w.vintage || "NV")}</span> <span class="producer">${esc(w.producer)}</span><br><em class="wname">${esc(w.wine)}</em></h3>
     <p class="ts-rating">${hasRating(w) ? `${esc(w.rating)}<small>/10</small>` : `<small>Not rated</small>`}</p>
     ${facts.length ? `<dl class="ts-facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>` : ""}
     ${w.notes ? `<p class="ts-notes">${esc(w.notes)}</p>` : `<p class="empty">No tasting notes.</p>`}`;
@@ -201,7 +201,7 @@ function entryHTML(w, source, owner, lists) {
 
   // Consumed bottles open their tasting card: the title is a button for keyboards, and app.js
   // also opens it when the rest of the entry is tapped.
-  const titleInner = `<span class="producer">${esc(w.producer)}</span> <span class="cuvee">${esc(w.wine)}</span>${
+  const titleInner = `<span class="producer">${esc(w.producer)}</span> <span class="cuvee wname">${esc(w.wine)}</span>${
     n > 1 ? ` <span class="qty" title="${n} bottles">×${n}</span>` : ""}`;
   const title = source === "consumed"
     ? `<button type="button" class="title entry-open" data-act="view" data-id="${id}">${titleInner}</button>`

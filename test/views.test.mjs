@@ -27,7 +27,7 @@ test("history: no monthly chart", () => {
 
 test("history: best bottle is the highest rated, most recent wins a tie, and opens its card", () => {
   const html = historyHTML(drunk, NOW);
-  assert.match(html, /data-act="view" data-id="b">2019 Jadot Beaune<\/button> <small>9\/10/);
+  assert.match(html, /data-act="view" data-id="b">2019 <span class="producer">Jadot<\/span> <span class="wname">Beaune<\/span><\/button> <small>9\/10/);
   assert.match(text(html), /Top producers Jadot 2 · Leflaive 1 · Penfolds 1/);
   assert.match(text(html), /Top grapes Pinot Noir 2/);
 });

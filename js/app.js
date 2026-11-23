@@ -317,7 +317,8 @@ function openDrinker(wine) {
   const n = bottleCount(wine);
   form.reset();
   $(".form-error", form).textContent = "";
-  $("#dr-sub").textContent = `${wine.vintage || "NV"} ${wine.producer} ${wine.wine}`;
+  const name = (cls, text) => Object.assign(document.createElement("span"), { className: cls, textContent: text });
+  $("#dr-sub").replaceChildren(`${wine.vintage || "NV"} `, name("producer", wine.producer), " ", name("wname", wine.wine));
   $("#dr-count-row").hidden = n < 2;
   form.elements.count.max = n;
   form.elements.count.value = 1;
@@ -392,6 +393,8 @@ $("#lg-form").addEventListener("submit", e => {
 /* ---------- Events ---------- */
 
 document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", () => b.closest("dialog").close()));
+// The tasting card closes on a tap outside it: the dialog itself is only the target on its backdrop.
+$("#tasting").addEventListener("click", e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 document.querySelectorAll(".chip").forEach(b => b.addEventListener("click", () => { state.filter = b.dataset.filter; render(); }));
 $("#search").addEventListener("input", e => { state.q = e.target.value; render(); });
 $("#add").addEventListener("click", () => openEditor(null));

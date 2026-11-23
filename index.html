@@ -61,27 +61,7 @@
 <!-- Add or edit a bottle. Fields marked data-for only show for that tab ((cellar or consumed)). -->
 <dialog id="editor" aria-labelledby="ed-title">
   <form class="dlg" id="ed-form" novalidate>
-    <div class="ed-head">
-      <h3 id="ed-title">Add a bottle</h3>
-      <!-- ✨ Fill in with AI: only when adding, logged in, and not in demo mode (js/app.js). -->
-      <button type="button" class="ai-toggle" id="ai-toggle" aria-expanded="false" aria-controls="ai-panel" title="Fill in with AI" hidden>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l1.9 5.6L19.5 9.5l-5.6 1.9L12 17l-1.9-5.6L4.5 9.5l5.6-1.9z"/><path d="M19 14l.9 2.6 2.6.9-2.6.9L19 21l-.9-2.6-2.6-.9 2.6-.9z"/></svg>
-        <span class="sr-only">Fill in with AI</span>
-      </button>
-    </div>
-    <!-- No name attributes here, so readFields() never sends these with the bottle. -->
-    <div class="ai-panel" id="ai-panel" hidden>
-      <div class="ai-row">
-        <input id="ai-text" type="text" maxlength="200" autocomplete="off" aria-label="Describe the wine" placeholder="e.g. rousseau gevrey 2019, or a note for the photo">
-        <label class="ai-cam" for="ai-photo" title="Take or choose a photo">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h3l2-2.5h6L17 7h3a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.6"/></svg>
-          <span class="sr-only">Take or choose a photo</span>
-        </label>
-        <input id="ai-photo" type="file" accept="image/*" hidden>
-        <button type="button" class="btn primary" id="ai-go">Fill in</button>
-      </div>
-      <p class="ai-status" id="ai-status" role="status"></p>
-    </div>
+    <h3 id="ed-title">Add a bottle</h3>
     <div class="field"><label for="f-producer">Producer</label>
       <input id="f-producer" name="producer" autocomplete="off" list="producers" placeholder="Domaine Duroche"></div>
     <div class="field"><label for="f-wine">Wine</label>
@@ -128,8 +108,26 @@
           <span>Hide from friends<small>Only you see it when logged in.</small></span></label>
       </div>
     </details>
+    <!-- No name attributes here, so readFields() never sends these with the bottle. -->
+    <div class="ai-panel" id="ai-panel" hidden>
+      <div class="ai-row">
+        <input id="ai-text" type="text" maxlength="200" autocomplete="off" aria-label="Describe the wine" placeholder="e.g. rousseau gevrey 2019, or a note for the photo">
+        <label class="ai-cam" for="ai-photo" title="Take or choose a photo">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h3l2-2.5h6L17 7h3a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.6"/></svg>
+          <span class="sr-only">Take or choose a photo</span>
+        </label>
+        <input id="ai-photo" type="file" accept="image/*" hidden>
+        <button type="button" class="btn primary" id="ai-go">Fill in</button>
+      </div>
+      <p class="ai-status" id="ai-status" role="status"></p>
+    </div>
     <p class="form-error" role="alert"></p>
     <div class="dlg-foot">
+      <!-- ✨ Fill in with AI: only when adding, logged in, and not in demo mode (js/app.js). -->
+      <button type="button" class="ai-toggle" id="ai-toggle" aria-expanded="false" aria-controls="ai-panel" title="Fill in with AI" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l1.9 5.6L19.5 9.5l-5.6 1.9L12 17l-1.9-5.6L4.5 9.5l5.6-1.9z"/><path d="M19 14l.9 2.6 2.6.9-2.6.9L19 21l-.9-2.6-2.6-.9 2.6-.9z"/></svg>
+        <span class="sr-only">Fill in with AI</span>
+      </button>
       <button type="button" class="btn danger" id="ed-delete">Delete</button>
       <span class="spacer"></span>
       <button type="button" class="btn" data-close>Cancel</button>
