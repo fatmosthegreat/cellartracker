@@ -110,6 +110,7 @@ function entryHTML(w, source, owner) {
     const ws = windowState(w.window);
     if (ws) meta.push(`<span class="pill ${ws.key}">${ws.label}</span>`);
     if (w.storage && w.storage !== "-") meta.push(`<span>${esc(w.storage)}</span>`);
+    if (w.status === "To collect" && w.collectBy) meta.push(`<span>Collect by ${esc(formatDate(w.collectBy))}</span>`);
   }
   if (owner && w.hidden) meta.push(`<span class="pill hidden">Hidden</span>`);
 

@@ -271,3 +271,198 @@ test('the web endpoints return JSON', () => {
   const unknown = JSON.parse(backend.doPost({ postData: { contents: '{"action":"explode"}' } }).getContent());
   assert.match(unknown.error, /Unknown action/);
 });
+
+/* ============================== Telegram bot ============================== */
+
+const CHAT = '4242';
+const SECRET = 'webhook-secret';
+
+// A cellar with the bot set up. `say` sends a chat message, `tap` presses a button.
+function freshBot() {
+  const c = freshCellar();
+  c.gas.PropertiesService.getScriptProperties().setProperties({
+    TELEGRAM_TOKEN: '123:abc', TELEGRAM_URL: 'https://script.google.com/macros/s/x/exec',
+    TELEGRAM_SECRET: SECRET, TELEGRAM_CHAT_ID: CHAT,
+  });
+  let updateId = 100;
+  const post = (update, secret = SECRET) => {
+    c.gas._fetches.length = 0;
+    c.backend.doPost({ parameter: { tg: secret }, postData: { contents: JSON.stringify(update) } });
+    return c.gas._fetches.slice();
+  };
+  const say = (text, chat = CHAT) => post({ update_id: ++updateId, message: { message_id: 1, chat: { id: Number(chat) }, text } });
+  const tap = data => post({ update_id: ++updateId, callback_query: { id: 'cb', data, message: { message_id: 7, chat: { id: Number(CHAT) } } } });
+  const sent = calls => calls.filter(f => f.method === 'sendMessage' || f.method === 'editMessageText').map(f => f.payload.text).join('\n');
+  const buttons = calls => calls.filter(f => f.payload.reply_markup).flatMap(f => f.payload.reply_markup.inline_keyboard.flat());
+  return Object.assign(c, { post, say, tap, sent, buttons });
+}
+
+test('the bot ignores a wrong secret, another chat, and repeated updates', () => {
+  const { post, say, ok } = freshBot();
+  assert.equal(post({ update_id: 1, message: { chat: { id: Number(CHAT) }, text: '/cellar' } }, 'wrong').length, 0);
+  assert.equal(say('/cellar', '999').length, 0);
+  const update = { update_id: 500, message: { chat: { id: Number(CHAT) }, text: '/cellar' } };
+  assert.ok(post(update).length > 0);
+  assert.equal(post(update).length, 0, 'a Telegram retry is not answered twice');
+  assert.equal(ok('list').cellar.length, 5);
+});
+
+test('the web page still works alongside the bot', () => {
+  const { backend } = freshBot();
+  const res = JSON.parse(backend.doPost({ parameter: {}, postData: { contents: '{"action":"list"}' } }).getContent());
+  assert.equal(res.ok, true);
+});
+
+test('/cellar lists every bottle by status, and plain text searches ignoring accents', () => {
+  const { say, sent, ok } = freshBot();
+  const text = sent(say('/cellar'));
+  assert.match(text, /In the cellar<\/b> · 4 bottles/);
+  assert.match(text, /To collect<\/b> · 1 bottle/);
+  for (const w of ok('list').cellar) assert.ok(text.includes(w.producer), w.producer);
+
+  const found = sent(say('romanee duroche'));
+  assert.match(found, /Duroche/);
+  assert.doesNotMatch(found, /Coudray/);
+  assert.match(sent(say('/search@TheCellar_bot ROMANÉE')), /Coudray-Bizot/);
+  assert.match(sent(say('/search nothing-like-this')), /Nothing in the cellar matches/);
+  assert.match(sent(say('/explode')), /I don't know \/explode/);
+});
+
+test('/stats, /collect and /help answer', () => {
+  const { say, sent } = freshBot();
+  assert.match(sent(say('/stats')), /<b>4<\/b> in the cellar\n<b>1<\/b> to collect\n<b>1<\/b> drunk\n<b>S\$809<\/b> on the shelf/);
+  assert.match(sent(say('/collect')), /A F Gros[\s\S]*Grand Cru, collect Fri 27 Nov/);
+  assert.match(sent(say('/help')), /\/drank/);
+});
+
+test('a long /cellar is split into messages under the Telegram limit', () => {
+  const { say, ok } = freshBot();
+  for (let i = 0; i < 120; i++) {
+    ok('create', { wine: { producer: 'Producer ' + i, wine: 'A rather long cuvée name for testing ' + i, vintage: 2000 + (i % 20), window: '2025–2035' } });
+  }
+  const msgs = say('/cellar').filter(f => f.method === 'sendMessage');
+  assert.ok(msgs.length > 1);
+  for (const m of msgs) assert.ok(m.payload.text.length <= 4096);
+  assert.ok(msgs.map(m => m.payload.text).join('\n').includes('Producer 119'));
+});
+
+test('/drank shows buttons, and tapping one drinks it exactly like the website', () => {
+  const { say, tap, sent, buttons, ok, byName } = freshBot();
+  const btns = buttons(say('/drank duroche'));
+  assert.equal(btns.length, 1);
+  assert.match(btns[0].text, /2018 Duroche Vosne-Romanée/);
+  const done = tap(btns[0].callback_data);
+  assert.ok(done.some(f => f.method === 'answerCallbackQuery'));
+  assert.match(sent(done), /Drank .*Duroche[\s\S]*That was the last one/);
+  const res = ok('list');
+  assert.equal(byName(res.cellar, 'Duroche').length, 0);
+  assert.equal(byName(res.drunk, 'Duroche').length, 1);
+  assert.match(sent(tap(btns[0].callback_data)), /no longer in the cellar/, 'a second tap is refused');
+  assert.match(sent(say('/drank nothing-like-this')), /Nothing matches/);
+});
+
+test('a failed tap acknowledgement still replaces the buttons, so a bottle is never drunk twice', () => {
+  const { say, tap, sent, buttons, gas } = freshBot();
+  const btn = buttons(say('/drank jadot'))[0];
+  gas._replies.answerCallbackQuery = () => ({ ok: false, description: 'query is too old' });
+  assert.match(sent(tap(btn.callback_data)), /Drank .*Jadot/);
+});
+
+test('/collected and /add1 change status and count', () => {
+  const { say, tap, buttons, ok, byName } = freshBot();
+  const coll = buttons(say('/collected'));
+  assert.equal(coll.length, 1, 'only bottles still to collect');
+  tap(coll[0].callback_data);
+  assert.equal(byName(ok('list').cellar, 'A F Gros')[0].status, 'In cellar');
+  tap(buttons(say('/add1 jadot'))[0].callback_data);
+  assert.equal(byName(ok('list').cellar, 'Jadot')[0].bottles, 2);
+});
+
+test('installTelegram sets the webhook with the secret and one daily reminder timer', () => {
+  const { backend, gas } = freshBot();
+  backend.installTelegram();
+  backend.installTelegram();  // running it twice doesn't double the timers
+  const hook = gas._fetches.find(f => f.method === 'setWebhook');
+  assert.equal(hook.payload.url, 'https://script.google.com/macros/s/x/exec?tg=' + SECRET);
+  assert.deepEqual(gas._triggers.map(t => [t.fn, t.schedule.atHour]), [['sendReminders', 9]]);
+  backend.uninstallTelegram();
+  assert.equal(gas._triggers.length, 0);
+});
+
+test('polling answers new messages once and moves past ones from other chats', () => {
+  const { backend, gas, sent } = freshBot();
+  const queue = [
+    { update_id: 900, message: { message_id: 1, chat: { id: 999 }, text: '/cellar' } },
+    { update_id: 901, message: { message_id: 2, chat: { id: Number(CHAT) }, text: '/help' } },
+  ];
+  const offsets = [];
+  gas._replies.getUpdates = p => { offsets.push(p.offset); return { ok: true, result: queue.filter(u => u.update_id >= p.offset) }; };
+  backend.pollTelegram();
+  assert.match(sent(gas._fetches), /\/drank/);
+  gas._fetches.length = 0;
+  backend.pollTelegram();
+  assert.deepEqual(offsets.slice(-1), [902], 'both updates are marked done');
+  assert.equal(sent(gas._fetches), '', 'nothing is answered twice');
+});
+
+test('findTelegramChatId saves the chat of the last message', () => {
+  const { backend, gas } = freshBot();
+  gas._replies.getUpdates = () => ({ ok: true, result: [{ update_id: 1, message: { chat: { id: 777, first_name: 'Me' }, text: 'hi' } }] });
+  backend.findTelegramChatId();
+  assert.equal(gas.PropertiesService.getScriptProperties().getProperty('TELEGRAM_CHAT_ID'), '777');
+  assert.equal(gas._fetches.at(-1).payload.chat_id, '777');
+});
+
+/* ---------- Reminders ---------- */
+
+const W = (over = {}) => ({ id: 'w1', producer: 'Jadot', wine: 'Gevrey', vintage: 2018, window: '2027–2033', status: 'In cellar', ...over });
+const due = (recs, today, sent = {}) => loadBackend(createFakeGas(), CODE).remindersDue_(recs, today, sent).map(r => r.key);
+
+test('window reminders: opens in its first year, closing from 1 July of its last year', () => {
+  assert.deepEqual(due([W()], '2026-12-31'), []);
+  assert.deepEqual(due([W()], '2027-01-01'), ['w1|open|2027']);
+  assert.deepEqual(due([W()], '2027-01-01', { 'w1|open|2027': '2027-01-01' }), [], 'not twice');
+  assert.deepEqual(due([W()], '2028-01-01'), []);
+  assert.deepEqual(due([W()], '2033-06-30'), []);
+  assert.deepEqual(due([W()], '2033-07-01'), ['w1|close|2033']);
+  assert.deepEqual(due([W()], '2034-07-01'), []);
+  assert.deepEqual(due([W({ window: 'someday' })], '2027-01-01'), []);
+});
+
+test('collect reminders: day before, on the day, and a Monday nudge when undated or overdue', () => {
+  const tc = over => W({ window: '', status: 'To collect', ...over });
+  assert.deepEqual(due([tc({ collectBy: '2026-11-27' })], '2026-11-26'), ['w1|collect|2026-11-27|before']);
+  assert.deepEqual(due([tc({ collectBy: '2026-11-27' })], '2026-11-27'), ['w1|collect|2026-11-27|day']);
+  assert.deepEqual(due([tc({ collectBy: '2026-11-27' })], '2026-11-25'), []);
+  assert.deepEqual(due([tc()], '2026-11-23'), ['w1|nudge|2026-11-23'], '23 Nov 2026 is a Monday');
+  assert.deepEqual(due([tc()], '2026-11-24'), [], 'not on Tuesday');
+  assert.deepEqual(due([tc({ collectBy: '2026-11-20' })], '2026-11-23'), ['w1|nudge|2026-11-23'], 'overdue');
+  assert.deepEqual(due([tc({ collectBy: '2026-12-20' })], '2026-11-23'), [], 'not due yet');
+  assert.deepEqual(due([W({ window: '', collectBy: '2026-11-27' })], '2026-11-27'), [], 'already collected');
+});
+
+test('sendReminders sends one message, then nothing more that day', () => {
+  const { backend, gas, ok } = freshBot();
+  const gros = ok('list').cellar.find(w => w.producer === 'A F Gros');
+  ok('update', { id: gros.id, wine: { collectBy: '2026-11-27' } });
+  gas._fetches.length = 0;
+  assert.equal(backend.sendReminders_('2026-11-26'), 1);
+  const msgs = gas._fetches.filter(f => f.method === 'sendMessage');
+  assert.equal(msgs.length, 1);
+  assert.match(msgs[0].payload.text, /Collect tomorrow[\s\S]*A F Gros/);
+  gas._fetches.length = 0;
+  assert.equal(backend.sendReminders_('2026-11-26'), 0);
+  assert.equal(gas._fetches.length, 0);
+});
+
+test('Collect by is a date, and is not carried into Drunk', () => {
+  const { ok, owner, tab } = freshCellar();
+  const w = ok('list').cellar.find(x => x.producer === 'A F Gros');
+  assert.match(owner('update', { id: w.id, wine: { collectBy: 'Friday' } }).error, /Collect by must be a date/);
+  ok('update', { id: w.id, wine: { collectBy: '2026-11-27' } });
+  assert.equal(ok('list').cellar.find(x => x.id === w.id).collectBy, '2026-11-27');
+  const res = ok('drink', { id: w.id });
+  assert.equal('collectBy' in res.drunk.at(-1), false);
+  const drunk = tab('Drunk');
+  assert.ok(!drunk.getRange(1, 1, 1, drunk.getLastColumn()).getDisplayValues()[0].includes('collectBy'));
+});

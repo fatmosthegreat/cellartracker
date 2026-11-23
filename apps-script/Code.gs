@@ -11,6 +11,7 @@
  * sheet; the app leaves columns it doesn't know about alone.
  *
  * First run:  setPassword() → setup() → Deploy as web app.   (See README.md.)
+ * Telegram:   setTelegram() → findTelegramChatId() → installTelegram().   (Optional; see README.md.)
  * New field:  add it to SCHEMA (and FIELD_RULES if it isn't free text), then run migrate().
  * Tests:      `node --test` in the repo runs this file against an in-memory sheet.
  *
@@ -21,7 +22,7 @@ const API_VERSION = 1;
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
-    'storage', 'price', 'purchased', 'notes', 'hidden', 'created', 'updated'],
+    'storage', 'price', 'purchased', 'notes', 'hidden', 'created', 'updated', 'collectBy'],
   Drunk: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'price', 'purchased',
     'drunkOn', 'rating', 'notes', 'hidden', 'created', 'updated'],
 };
@@ -36,6 +37,7 @@ const FIELD_RULES = {
   rating: { type: 'number', min: 0, max: 10, label: 'Rating' },
   purchased: { type: 'date', label: 'Bought on' },
   drunkOn: { type: 'date', label: 'Drunk on' },
+  collectBy: { type: 'date', label: 'Collect by' },
   status: { type: 'enum', values: ['In cellar', 'To collect'], label: 'Status' },
   hidden: { type: 'bool' },
 };
@@ -106,7 +108,16 @@ function doGet() {
 }
 
 // The page POSTs plain-text JSON ({ action, key?, ... }) so the browser skips the CORS preflight.
+// Telegram POSTs updates to the same URL with ?tg=<secret> added (see installTelegram).
 function doPost(e) {
+  if (e && e.parameter && e.parameter.tg) {
+    try {
+      handleTelegram_(JSON.parse((e.postData && e.postData.contents) || '{}'), e.parameter.tg);
+    } catch (err) {
+      Logger.log('Telegram update failed: ' + ((err && err.message) || err));
+    }
+    return ContentService.createTextOutput('ok');
+  }
   let req;
   try {
     req = JSON.parse((e && e.postData && e.postData.contents) || '{}');
@@ -382,6 +393,392 @@ function sha256_(text) {
     .join('');
 }
 
+/* ============================== Telegram bot (optional) ============================== */
+//
+// Reminders go out once a day from a timer; commands arrive as webhook POSTs to doPost.
+// Only your chat is answered, and every update must carry the secret in the webhook URL.
+// The token, chat id and secret live in Script Properties, never in this file.
+
+const BOT = { currency: 'S$', reminderHour: 9, maxButtons: 30 };
+
+// Run once from the editor. Paste your token and web app URL, run, then put the placeholders back.
+function setTelegram() {
+  const token = 'paste-your-bot-token-here';
+  const webAppUrl = 'paste-your-web-app-url-here';
+  if (token.indexOf('paste-') === 0 || webAppUrl.indexOf('paste-') === 0) {
+    throw new Error('Paste your bot token and web app URL into setTelegram(), then run it again.');
+  }
+  if (!/^\d+:[\w-]{30,}$/.test(token)) throw new Error('That doesn\'t look like a bot token. Copy it again from @BotFather.');
+  if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(webAppUrl)) {
+    throw new Error('The web app URL should start with https://script.google.com/ and end in /exec.');
+  }
+  PropertiesService.getScriptProperties().setProperties({
+    TELEGRAM_TOKEN: token,
+    TELEGRAM_URL: webAppUrl,
+    TELEGRAM_SECRET: Utilities.getUuid().replace(/-/g, ''),
+  });
+  Logger.log('Saved. Send your bot a message in Telegram, then run findTelegramChatId(). Put the placeholders back afterwards.');
+}
+
+// Finds your chat from the last message you sent the bot, and saves it as the only chat it answers.
+function findTelegramChatId() {
+  let updates;
+  try {
+    updates = telegramApi_('getUpdates', {}).result;
+  } catch (err) {
+    throw new Error(String(err.message) + ' (If the bot is already installed, run uninstallTelegram() first.)');
+  }
+  const msgs = updates.filter(function (u) { return u.message && u.message.chat; }).map(function (u) { return u.message; });
+  if (!msgs.length) throw new Error('No messages yet. Send your bot "hi" in Telegram, then run this again.');
+  const chat = msgs[msgs.length - 1].chat;
+  PropertiesService.getScriptProperties().setProperties({ TELEGRAM_CHAT_ID: String(chat.id) });
+  telegramSend_('Cellar bot connected 🍷\nRun installTelegram() in Apps Script to turn on commands and reminders.');
+  Logger.log('Connected to ' + (chat.first_name || chat.title || 'chat') + ' (' + chat.id + '). Now run migrate(), then installTelegram().');
+}
+
+// Turns on commands (webhook) and the daily reminders. Safe to run again.
+function installTelegram() {
+  const cfg = telegramConfig_();
+  telegramApi_('setWebhook', { url: cfg.url + '?tg=' + cfg.secret, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true });
+  telegramApi_('setMyCommands', { commands: Object.keys(TG_COMMANDS).filter(function (c) { return TG_COMMANDS[c].menu; })
+    .map(function (c) { return { command: c, description: TG_COMMANDS[c].help }; }) });
+  replaceTrigger_('pollTelegram', null);
+  replaceTrigger_('sendReminders', function (b) { return b.everyDays(1).atHour(BOT.reminderHour); });
+  Logger.log('Done. Try /help in Telegram. Reminders go out at ' + BOT.reminderHour + ':00 (Project Settings time zone) when something is due.');
+}
+
+// Fallback if commands get no reply (check with telegramStatus): checks for messages every minute instead.
+function installTelegramPolling() {
+  telegramConfig_();
+  telegramApi_('deleteWebhook', {});
+  replaceTrigger_('pollTelegram', function (b) { return b.everyMinutes(1); });
+  Logger.log('Polling every minute. Replies can take up to a minute.');
+}
+
+// Stops commands and reminders. Your settings stay, so installTelegram() turns it back on.
+function uninstallTelegram() {
+  telegramApi_('deleteWebhook', {});
+  replaceTrigger_('pollTelegram', null);
+  replaceTrigger_('sendReminders', null);
+  Logger.log('Commands and reminders are off.');
+}
+
+function telegramStatus() {
+  Logger.log(JSON.stringify(telegramApi_('getWebhookInfo', {}).result, null, 2));
+}
+
+// The daily timer calls this.
+function sendReminders() {
+  return sendReminders_(today_());
+}
+
+// The every-minute timer calls this when polling is on. Every update fetched is marked as done,
+// including ones the bot ignores (other chats), so Telegram doesn't send them again.
+function pollTelegram() {
+  const cfg = telegramConfig_();
+  const props = PropertiesService.getScriptProperties();
+  const last = Number(props.getProperty('TG_LAST_UPDATE') || 0);
+  const updates = telegramApi_('getUpdates', { offset: last + 1, timeout: 0, allowed_updates: ['message', 'callback_query'] }).result;
+  updates.forEach(function (u) { handleTelegram_(u, cfg.secret); });
+  const newest = updates.reduce(function (n, u) { return Math.max(n, u.update_id); }, 0);
+  withLock_(function () {
+    if (newest > Number(props.getProperty('TG_LAST_UPDATE') || 0)) props.setProperties({ TG_LAST_UPDATE: String(newest) });
+  });
+}
+
+/* ---------- Reminders ---------- */
+
+function sendReminders_(today) {
+  const props = PropertiesService.getScriptProperties();
+  let sent = {};
+  try { sent = JSON.parse(props.getProperty('REMINDERS_SENT') || '{}'); } catch (err) { sent = {}; }
+  const recs = readRows_(table_('Cellar')).map(function (r) { return r.rec; });
+  const due = remindersDue_(recs, today, sent);
+  if (due.length) {
+    telegramSendLong_(['<b>Cellar reminders</b>'].concat(due.map(function (d) { return d.text; })).join('\n\n'));
+    due.forEach(function (d) { sent[d.key] = today; });
+  }
+  // Forget bottles that are gone, weekly nudges after a week, and anything older than a year.
+  const ids = {};
+  recs.forEach(function (r) { ids[r.id] = true; });
+  const yearAgo = addDays_(today, -400);
+  const weekAgo = addDays_(today, -8);
+  Object.keys(sent).forEach(function (k) {
+    const parts = k.split('|');
+    if (!ids[parts[0]] || sent[k] < yearAgo || (parts[1] === 'nudge' && sent[k] < weekAgo)) delete sent[k];
+  });
+  props.setProperties({ REMINDERS_SENT: JSON.stringify(sent) });
+  return due.length;
+}
+
+// Pure: which reminders are due today. `sent` holds the keys already sent, so nothing repeats.
+// The year or date is part of each key, so changing a bottle's window or date re-arms it.
+function remindersDue_(recs, today, sent) {
+  const year = Number(today.slice(0, 4));
+  const tomorrow = addDays_(today, 1);
+  const monday = new Date(today + 'T12:00:00Z').getUTCDay() === 1;
+  const out = [];
+  const add = function (key, text) { if (!(key in sent)) out.push({ key: key, text: text }); };
+  sortCellar_(recs).forEach(function (w) {
+    const win = parseWindow_(w.window);
+    if (win && year === win.from) {
+      add(w.id + '|open|' + win.from, '🍷 <b>Ready to drink</b> from this year\n' + bottleLine_(w));
+    }
+    if (win && year === win.to && today >= win.to + '-07-01') {
+      add(w.id + '|close|' + win.to, '⏳ <b>Drink by December</b>, its window closes this year\n' + bottleLine_(w));
+    }
+    if (w.status !== 'To collect') return;
+    const where = w.storage && w.storage !== '-' ? '\n' + escH_(w.storage) : '';
+    if (w.collectBy === tomorrow) {
+      add(w.id + '|collect|' + w.collectBy + '|before', '📦 <b>Collect tomorrow</b>\n' + bottleLine_(w) + where);
+    } else if (w.collectBy === today) {
+      add(w.id + '|collect|' + w.collectBy + '|day', '📦 <b>Collect today</b>\n' + bottleLine_(w) + where);
+    } else if (monday && (!w.collectBy || w.collectBy < today)) {
+      const late = w.collectBy ? ' (was due ' + niceDate_(w.collectBy) + ')' : '';
+      add(w.id + '|nudge|' + today, '📦 <b>Still to collect</b>' + late + '\n' + bottleLine_(w) + where);
+    }
+  });
+  return out;
+}
+
+/* ---------- Commands ---------- */
+
+// `menu` commands show in Telegram's command list. `run` gets the text after the command.
+const TG_COMMANDS = {
+  cellar: { menu: true, help: 'Everything in the cellar', run: function () { return { text: cellarText_(cellarRecs_()) }; } },
+  ready: { menu: true, help: 'In its drinking window now', run: function () {
+    const year = Number(today_().slice(0, 4));
+    const recs = cellarRecs_().filter(function (w) { const win = parseWindow_(w.window); return win && win.from <= year && year <= win.to; });
+    return { text: listText_('Ready to drink', recs, 'Nothing is in its drinking window right now.') };
+  } },
+  closing: { menu: true, help: 'Windows ending this year or next', run: function () {
+    const year = Number(today_().slice(0, 4));
+    const recs = cellarRecs_().filter(function (w) { const win = parseWindow_(w.window); return win && (win.to === year || win.to === year + 1); })
+      .sort(function (a, b) { return parseWindow_(a.window).to - parseWindow_(b.window).to; });
+    return { text: listText_('Drink soon', recs, 'No windows end this year or next.', true) };
+  } },
+  collect: { menu: true, help: 'Bottles to collect', run: function () {
+    const recs = cellarRecs_().filter(function (w) { return w.status === 'To collect'; });
+    if (!recs.length) return { text: 'Nothing to collect.' };
+    return { text: '<b>To collect</b>\n\n' + recs.map(function (w) {
+      return bottleLine_(w) + (w.collectBy ? '\nCollect by ' + niceDate_(w.collectBy) : '') +
+        (w.storage && w.storage !== '-' ? '\n' + escH_(w.storage) : '');
+    }).join('\n\n') };
+  } },
+  search: { menu: true, help: 'Find a bottle, e.g. /search romanee', run: function (q) {
+    if (!q) return { text: 'Type what to look for, e.g. /search romanee' };
+    return { text: listText_('Matches for “' + escH_(q) + '”', searchRecs_(cellarRecs_(), q), 'Nothing in the cellar matches “' + escH_(q) + '”.') };
+  } },
+  stats: { menu: true, help: 'Bottle counts and value', run: function () {
+    const recs = cellarRecs_();
+    const sum = function (list) { return list.reduce(function (n, w) { return n + (w.bottles || 1); }, 0); };
+    const value = recs.reduce(function (n, w) { return n + (w.price || 0) * (w.bottles || 1); }, 0);
+    return { text: [
+      '<b>' + sum(recs.filter(function (w) { return w.status === 'In cellar'; })) + '</b> in the cellar',
+      '<b>' + sum(recs.filter(function (w) { return w.status === 'To collect'; })) + '</b> to collect',
+      '<b>' + readRows_(table_('Drunk')).length + '</b> drunk',
+      '<b>' + escH_(BOT.currency) + money_(value) + '</b> on the shelf',
+    ].join('\n') };
+  } },
+  drank: { menu: true, help: 'Record a bottle you drank', run: function (q) {
+    return pickBottle_('drink', q, cellarRecs_(), 'Which one did you drink?');
+  } },
+  collected: { menu: true, help: 'Mark a bottle as collected', run: function (q) {
+    return pickBottle_('coll', q, cellarRecs_().filter(function (w) { return w.status === 'To collect'; }), 'Which one did you collect?');
+  } },
+  add1: { menu: true, help: 'Add another bottle of a wine', run: function (q) {
+    return pickBottle_('add1', q, cellarRecs_(), 'Which wine did you buy another bottle of?');
+  } },
+  help: { menu: true, help: 'What I can do', run: function () {
+    return { text: Object.keys(TG_COMMANDS).filter(function (c) { return TG_COMMANDS[c].menu; })
+      .map(function (c) { return '/' + c + ' · ' + escH_(TG_COMMANDS[c].help); }).join('\n') +
+      '\n\nOr just type a name to search. Reminders arrive at ' + BOT.reminderHour + ':00 when something is due.' };
+  } },
+};
+TG_COMMANDS.start = { help: '', run: TG_COMMANDS.help.run };
+
+// What tapping a bottle's button does. Each returns the text that replaces the buttons.
+const TG_ACTIONS = {
+  drink: function (w) {
+    const res = withLock_(function () { return drinkWine_(w.id, {}); });
+    return '🍷 Drank ' + bottleLine_(w, true) + '\n' + (res.left ? res.left + ' left' : 'That was the last one') + '. Add a rating on the website.';
+  },
+  coll: function (w) {
+    if (w.status !== 'To collect') return bottleLine_(w, true) + ' is already in the cellar.';
+    withLock_(function () { return updateWine_(w.id, { status: 'In cellar' }); });
+    return '📦 Collected ' + bottleLine_(w, true) + '. It\'s now in the cellar.';
+  },
+  add1: function (w) {
+    const res = withLock_(function () { return adjustBottles_(w.id, 1); });
+    return '➕ ' + bottleLine_(w, true) + ' now ×' + res.bottles;
+  },
+};
+
+// Entry point for every update, from the webhook or from polling. Returns true if it was handled.
+function handleTelegram_(update, secret) {
+  const props = PropertiesService.getScriptProperties();
+  const want = props.getProperty('TELEGRAM_SECRET');
+  if (!want || secret !== want || !update || typeof update.update_id !== 'number') return false;
+  const cb = update.callback_query;
+  const msg = update.message || (cb && cb.message);
+  const chatId = props.getProperty('TELEGRAM_CHAT_ID');
+  if (!msg || !msg.chat || !chatId || String(msg.chat.id) !== chatId) return false;
+
+  // Telegram retries when it doesn't like the response, so each update is handled once only.
+  const fresh = withLock_(function () {
+    if (update.update_id <= Number(props.getProperty('TG_LAST_UPDATE') || 0)) return false;
+    props.setProperties({ TG_LAST_UPDATE: String(update.update_id) });
+    return true;
+  });
+  if (!fresh) return false;
+
+  if (cb) {
+    // Acknowledge first: if this fails (e.g. a stale tap), the buttons must still be replaced below,
+    // or a second tap could drink another bottle.
+    try { telegramApi_('answerCallbackQuery', { callback_query_id: cb.id }); } catch (err) { Logger.log(String(err.message)); }
+    let text;
+    try {
+      const m = /^(drink|coll|add1):(\w+)$/.exec(cb.data || '');
+      if (!m) throw new Error('That button has expired.');
+      const found = findIn_(table_('Cellar'), m[2]);
+      if (!found) throw new Error('That bottle is no longer in the cellar.');
+      text = TG_ACTIONS[m[1]](found.rec);
+    } catch (err) {
+      text = '⚠️ ' + escH_(botError_(err));
+    }
+    telegramApi_('editMessageText', { chat_id: chatId, message_id: msg.message_id, text: text, parse_mode: 'HTML' });
+    return true;
+  }
+
+  const m = /^\/(\w+)(?:@\w+)?\s*([\s\S]*)$/.exec(String(msg.text || '').trim());
+  const name = m ? m[1].toLowerCase() : 'search';
+  const arg = m ? m[2].trim() : String(msg.text || '').trim();
+  const cmd = TG_COMMANDS[name];
+  try {
+    if (!cmd) throw new Error('I don\'t know /' + name + '. Try /help.');
+    const reply = cmd.run(arg);
+    telegramSendLong_(reply.text, reply.buttons);
+  } catch (err) {
+    telegramSend_('⚠️ ' + escH_(botError_(err)));
+  }
+  return true;
+}
+
+// Buttons for the bottles matching `q`, so you tap the one you mean.
+function pickBottle_(act, q, recs, question) {
+  const matches = q ? searchRecs_(recs, q) : sortCellar_(recs);
+  if (!matches.length) return { text: q ? 'Nothing matches “' + escH_(q) + '”.' : 'No bottles to choose from.' };
+  if (matches.length > BOT.maxButtons) {
+    return { text: matches.length + ' bottles match. Add a word or two, e.g. /' + ({ drink: 'drank', coll: 'collected', add1: 'add1' })[act] + ' duroche 2018' };
+  }
+  return {
+    text: question,
+    buttons: matches.map(function (w) {
+      const label = [w.vintage || 'NV', w.producer, w.wine].join(' ') + ((w.bottles || 1) > 1 ? ' ×' + w.bottles : '');
+      return [{ text: label.slice(0, 60), callback_data: act + ':' + w.id }];
+    }),
+  };
+}
+
+function cellarText_(recs) {
+  if (!recs.length) return 'The cellar is empty.';
+  return ['In cellar', 'To collect'].map(function (status) {
+    const list = recs.filter(function (w) { return w.status === status; });
+    if (!list.length) return '';
+    const n = list.reduce(function (a, w) { return a + (w.bottles || 1); }, 0);
+    return '<b>' + (status === 'In cellar' ? 'In the cellar' : 'To collect') + '</b> · ' + n + ' bottle' + (n === 1 ? '' : 's') + '\n' +
+      list.map(function (w) { return bottleLine_(w); }).join('\n');
+  }).filter(Boolean).join('\n\n');
+}
+
+function listText_(title, recs, empty, keepOrder) {
+  if (!recs.length) return empty;
+  return '<b>' + title + '</b>\n' + (keepOrder ? recs : sortCellar_(recs)).map(function (w) { return bottleLine_(w); }).join('\n');
+}
+
+// "<b>2018</b> Duroche · <i>Vosne-Romanée</i> ×2 · drink 2024–2035"
+function bottleLine_(w, short) {
+  const n = w.bottles || 1;
+  return '<b>' + escH_(w.vintage || 'NV') + '</b> ' + escH_(w.producer) + ' · <i>' + escH_(w.wine) + '</i>' +
+    (n > 1 && !short ? ' ×' + n : '') + (w.window && !short ? ' · drink ' + escH_(w.window) : '');
+}
+
+function cellarRecs_() {
+  return sortCellar_(readRows_(table_('Cellar')).map(function (r) { return r.rec; }));
+}
+
+// Every word must appear somewhere, ignoring case and accents: "duroche 2018" finds "Duroché … 2018".
+function searchRecs_(recs, q) {
+  const words = fold_(q).split(/\s+/).filter(Boolean);
+  return sortCellar_(recs.filter(function (w) {
+    const hay = fold_([w.producer, w.wine, w.grape, w.vintage, w.colour, w.notes].join(' '));
+    return words.every(function (word) { return hay.indexOf(word) >= 0; });
+  }));
+}
+
+// Same order as the website: by colour, then producer, then vintage.
+function sortCellar_(recs) {
+  const order = { Sparkling: 0, White: 1, 'Rosé': 2, Red: 3, Sweet: 4, Fortified: 5 };
+  const rank = function (w) { return w.colour in order ? order[w.colour] : 9; };
+  return recs.slice().sort(function (a, b) {
+    return rank(a) - rank(b) || String(a.producer).localeCompare(String(b.producer)) || (a.vintage || 0) - (b.vintage || 0);
+  });
+}
+
+/* ---------- Talking to Telegram ---------- */
+
+function telegramConfig_() {
+  const p = PropertiesService.getScriptProperties();
+  const cfg = { token: p.getProperty('TELEGRAM_TOKEN'), url: p.getProperty('TELEGRAM_URL'), secret: p.getProperty('TELEGRAM_SECRET'), chatId: p.getProperty('TELEGRAM_CHAT_ID') };
+  if (!cfg.token || !cfg.url || !cfg.secret) throw new Error('Run setTelegram() first.');
+  if (!cfg.chatId) throw new Error('Send your bot a message in Telegram, then run findTelegramChatId().');
+  return cfg;
+}
+
+function telegramApi_(method, payload) {
+  const token = PropertiesService.getScriptProperties().getProperty('TELEGRAM_TOKEN');
+  if (!token) throw new Error('No Telegram bot token yet. Run setTelegram() first.');
+  const res = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/' + method, {
+    method: 'post', contentType: 'application/json', payload: JSON.stringify(payload || {}), muteHttpExceptions: true,
+  });
+  let body = null;
+  try { body = JSON.parse(res.getContentText()); } catch (err) { body = null; }
+  if (!body || !body.ok) {
+    throw new Error('Telegram ' + method + ' failed: ' + ((body && body.description) || 'HTTP ' + res.getResponseCode()));
+  }
+  return body;
+}
+
+function telegramSend_(text, buttons) {
+  const chatId = PropertiesService.getScriptProperties().getProperty('TELEGRAM_CHAT_ID');
+  if (!chatId) throw new Error('No Telegram chat yet. Run findTelegramChatId().');
+  const payload = { chat_id: chatId, text: text, parse_mode: 'HTML', disable_web_page_preview: true };
+  if (buttons) payload.reply_markup = { inline_keyboard: buttons };
+  return telegramApi_('sendMessage', payload);
+}
+
+// Telegram caps a message at 4096 characters, so long lists go out in parts, split between lines.
+function telegramSendLong_(text, buttons) {
+  const parts = [];
+  let cur = '';
+  String(text).split('\n').forEach(function (line) {
+    if (cur && cur.length + line.length + 1 > 3800) { parts.push(cur); cur = ''; }
+    cur = cur ? cur + '\n' + line : line;
+  });
+  parts.push(cur);
+  parts.forEach(function (p, i) { telegramSend_(p, i === parts.length - 1 ? buttons : null); });
+}
+
+// Replaces any timer for `fn`; `schedule` sets the new one up, or null just removes it.
+function replaceTrigger_(fn, schedule) {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === fn) ScriptApp.deleteTrigger(t); });
+  if (schedule) schedule(ScriptApp.newTrigger(fn).timeBased()).create();
+}
+
+function botError_(err) {
+  return String((err && err.message) || err).replace(/ Refresh the page\.$/, '');
+}
+
 /* ============================== Small helpers ============================== */
 
 function withLock_(fn) {
@@ -401,6 +798,34 @@ function trim_(s) { return String(s).trim(); }
 function newId_() { return Utilities.getUuid().replace(/-/g, '').slice(0, 12); }
 function timestamp_() { return new Date().toISOString(); }
 function today_() { return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd'); }
+
+// '2026-11-23' + 1 → '2026-11-24'. Works on the date alone, so time zones don't matter.
+function addDays_(iso, n) {
+  const d = new Date(iso + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+// '2026-11-27' → '27 Nov 2026'
+function niceDate_(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso));
+  if (!m) return String(iso);
+  return Number(m[3]) + ' ' + 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split(' ')[Number(m[2]) - 1] + ' ' + m[1];
+}
+
+// Same rule as parseWindow in js/format.js: "2024–2030" → { from: 2024, to: 2030 }, anything else → null.
+function parseWindow_(text) {
+  const m = /(\d{4})\D+(\d{4})/.exec(String(text || ''));
+  if (!m) return null;
+  const from = Number(m[1]);
+  const to = Number(m[2]);
+  return from <= to ? { from: from, to: to } : null;
+}
+
+// Same as fold in js/format.js: lower case without accents.
+function fold_(s) { return String(s === null || s === undefined ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(); }
+function escH_(s) { return String(s === null || s === undefined ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function money_(n) { return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
 
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);

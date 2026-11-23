@@ -84,6 +84,11 @@ function createFakeGas() {
   const cache = {};
   const pad = n => String(n).padStart(2, '0');
 
+  // Telegram calls are recorded, not sent. Tests can set replies[method] = payload => body.
+  const fetches = [];
+  const replies = {};
+  const triggers = [];
+
   return {
     SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet, flush() {} },
     Utilities: {
@@ -117,7 +122,34 @@ function createFakeGas() {
     },
     Session: { getScriptTimeZone: () => 'Asia/Singapore' },
     Logger: { log() {} },
+    UrlFetchApp: {
+      fetch: (url, opts) => {
+        const method = url.split('/').pop();
+        const payload = JSON.parse((opts && opts.payload) || '{}');
+        fetches.push({ method, payload });
+        const body = replies[method] ? replies[method](payload) : { ok: true, result: method === 'getUpdates' ? [] : true };
+        return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+      },
+    },
+    ScriptApp: {
+      getProjectTriggers: () => triggers.slice(),
+      deleteTrigger: t => { triggers.splice(triggers.indexOf(t), 1); },
+      newTrigger: fn => {
+        const t = { fn, schedule: {}, getHandlerFunction: () => fn };
+        const b = {
+          timeBased: () => b,
+          everyDays: n => { t.schedule.everyDays = n; return b; },
+          everyMinutes: n => { t.schedule.everyMinutes = n; return b; },
+          atHour: h => { t.schedule.atHour = h; return b; },
+          create: () => { triggers.push(t); return t; },
+        };
+        return b;
+      },
+    },
     _spreadsheet: spreadsheet,  // for tests: poke at the sheet directly
+    _fetches: fetches,          // for tests: Telegram calls made
+    _replies: replies,          // for tests: fake Telegram responses
+    _triggers: triggers,        // for tests: timers installed
   };
 }
 
@@ -125,7 +157,8 @@ function createFakeGas() {
 function loadBackend(gas, codeSource) {
   const names = Object.keys(gas).filter(k => !k.startsWith('_'));
   const factory = new Function(...names,
-    codeSource + '\n;return { handle_, doGet, doPost, setup, migrate, sha256_, SCHEMA };');
+    codeSource + '\n;return { handle_, doGet, doPost, setup, migrate, sha256_, SCHEMA,' +
+    ' handleTelegram_, sendReminders_, remindersDue_, installTelegram, uninstallTelegram, findTelegramChatId, pollTelegram };');
   return factory(...names.map(n => gas[n]));
 }
 
