@@ -637,7 +637,7 @@ test('a label photo becomes a draft with one Claude call, and ✅ Add puts it in
   assert.equal(c.calls(calls, 'getFile')[0].payload.file_id, 'big');
 
   const draft = c.draft(calls);
-  assert.match(draft.text, /2019<\/b> Domaine Duroché · <i>Gevrey-Chambertin 1er Cru · Lavaut St-Jacques/);
+  assert.match(draft.text, /2019<\/b> Domaine Duroché · <i>Gevrey-Chambertin 1er Cru Lavaut St-Jacques/);
   assert.match(draft.text, /No drinking window yet[\s\S]*Reply to this message with the drinking window/);
   assert.deepEqual(Object.keys(draft.buttons), ['Add', 'Fix', 'Collect', 'Delivery', 'Retry', 'Cancel']);
   assert.equal(draft.labels.Retry, '🔁 Retry with Sonnet');
@@ -651,7 +651,7 @@ test('a label photo becomes a draft with one Claude call, and ✅ Add puts it in
 
   assert.match(c.sent(c.press(withWindow.buttons.Add, withWindow.messageId)), /Added .*Duroché/);
   const added = c.byName(c.ok('list').cellar, 'Domaine Duroché')[0];
-  assert.equal(added.wine, 'Gevrey-Chambertin 1er Cru · Lavaut St-Jacques');
+  assert.equal(added.wine, 'Gevrey-Chambertin 1er Cru Lavaut St-Jacques');
   assert.equal(added.vintage, 2019);
   assert.equal(added.window, '2027–2040');
   assert.equal(added.colour, 'Red');
@@ -780,7 +780,7 @@ test('/add looks a wine up by name with Haiku, asks for the window, and works li
   const edited = c.reply(c.lastMessageId(), 'cuvee: Les Sétilles');
   assert.equal(c.calls(edited, 'anthropic').length, 0);
   const fixed = c.draft(edited);
-  assert.match(fixed.text, /Bourgogne Blanc · Les Sétilles[\s\S]*Drink 2024–2030/);
+  assert.match(fixed.text, /Bourgogne Blanc Les Sétilles[\s\S]*Drink 2024–2030/);
 
   // 🔁 Retry rereads the same typed text with Sonnet, keeps the window and doesn't ask again.
   const retried = c.press(fixed.buttons.Retry, fixed.messageId);
@@ -932,11 +932,11 @@ test('the website\'s ✨ identify uses the same AI code, for the owner only, and
 
   // Typed: Haiku, the same prompt as the bot, and the cuvée folded into the wine for the Add form.
   const typed = c.ok('identify', { identify: { text: '  levlaie bogogne blanc 2022 ' } });
-  assert.deepEqual(typed.result, { producer: 'Domaine Duroché', wine: 'Gevrey-Chambertin 1er Cru · Lavaut St-Jacques',
+  assert.deepEqual(typed.result, { producer: 'Domaine Duroché', wine: 'Gevrey-Chambertin 1er Cru Lavaut St-Jacques',
     vintage: '2019', colour: 'Red', grape: 'Pinot Noir' });
   const [first] = anthropic();
   assert.equal(first.payload.model, 'claude-haiku-5-5');
-  assert.match(first.payload.system, /You identify one wine for a cellar list/);
+  assert.match(first.payload.system, /You identify ONE wine for a personal cellar list/);
   assert.deepEqual(first.payload.messages[0].content, [{ type: 'text', text: 'The owner typed: "levlaie bogogne blanc 2022"' }]);
   assert.equal(c.ok('list').cellar.length, 5, 'nothing is saved');
 

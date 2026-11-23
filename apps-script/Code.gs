@@ -26,7 +26,7 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-24.1';
+const BUILD = '2026-11-24.3';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
@@ -1358,14 +1358,53 @@ function downloadPhoto_(fileId) {
 function readWine_(content, model) {
   return claude_({
     model: model,
-    system: 'You identify one wine for a cellar list, from a photo of its label or from a name the owner typed. ' +
-      'From a photo, copy names as printed, with their accents. Typed names may be misspelled or shortened: give ' +
-      'the real, correctly spelled names, e.g. "rouseau" is "Domaine Armand Rousseau". producer: the domaine, château or ' +
-      'house. wine: the appellation or wine name with its classification, e.g. "Vosne-Romanée 1er Cru". cuvee: ' +
-      'the vineyard or cuvée name if there is one, else "". vintage: the four-digit year, or "" if non-vintage or ' +
-      'not given. colour: from the label or what you know of the wine, or "" if unsure. grape: the main grape or ' +
-      'grapes, spelt like this where they fit: ' + lookups_().lists.grapes.join(', ') + '. Leave a field "" ' +
-      'rather than guess. readable: false if you can\'t tell which wine it is.',
+    // The examples deliberately avoid the sample bottles in dev/fake-gas.js (a test checks this).
+    system: [
+      'You identify ONE wine for a personal cellar list, from a photo of its label or from a name the owner typed.',
+      '',
+      'Split the wine into three parts:',
+      '- PRODUCER: who made the wine. The estate, château, domaine, house or winery. Never an importer, distributor ' +
+        'or shop. Keep "Domaine", "Château" or "Maison" only if printed as part of the name.',
+      '- WINE: where the wine is from, in this order: region or appellation, then classification, then named ' +
+        'vineyard. If the label names the grape as the wine\'s identity (common outside Europe), add it after the region.',
+      '- CUVEE: any other name the producer gives this bottling: brand, bin number, cuvée name, second-wine name, or ' +
+        'style words like Brut or Blanc de Blancs. Keep the word "Cuvée" if printed. "" if none.',
+      '',
+      'Rules',
+      '- Copy all names as printed, with their accents.',
+      '- Two makers: if the label (or the owner) names one party who grew or made the wine and a DIFFERENT party ' +
+        'who raised or bottled it ("Élevé par", "Sélectionné et élevé par", "Mis en bouteille par" another house), ' +
+        'producer is "Maker (Raiser)". If both names are the same estate (e.g. its company name, SCEA or GFA), use ' +
+        'the estate name alone.',
+      '- Copy classifications as printed ("Premier Grand Cru Classé", "Grand Cru"), except write Burgundy and ' +
+        'Champagne "Premier Cru" as "1er Cru". Never repeat a name, e.g. "Échézeaux Grand Cru", not ' +
+        '"Échézeaux Grand Cru Échézeaux".',
+      '- If you cannot tell whether a name is a vineyard or a bottling name, put it in wine.',
+      '- If the photo shows several bottles, read only the most central, fully visible one. A note from the owner ' +
+        'overrides the label.',
+      '- Vintage: the four-digit harvest year only. Ignore founding years, bottling or disgorgement dates, lot and ' +
+        'édition numbers. "" if non-vintage.',
+      '- Colour and grape: from the label, or only where certain for that wine (e.g. red Burgundy = Pinot Noir, ' +
+        'Blanc de Blancs = Chardonnay). Spell grapes like this where they fit: ' + lookups_().lists.grapes.join(', ') + '.',
+      '- Typed names may be misspelled or shortened: give the real, correctly spelled names. If the text could be ' +
+        'several wines, choose the most general one that fits (e.g. the village wine rather than a vineyard) ' +
+        'instead of refusing.',
+      '- Leave any field "" rather than guess. readable: false if you cannot tell both the producer and the wine.',
+      '',
+      'Examples',
+      '- Domaine Georges Mugneret-Gibourg, Nuits-Saint-Georges Premier Cru Les Chaignots 2019 → producer "Domaine ' +
+        'Georges Mugneret-Gibourg", wine "Nuits-Saint-Georges 1er Cru Les Chaignots", cuvee "", vintage "2019".',
+      '- Hospices de Beaune 2019 Pommard Cuvée Suzanne Chaudron, Élevé par Maison Dupont → producer "Hospices de ' +
+        'Beaune (Maison Dupont)", wine "Pommard", cuvee "Cuvée Suzanne Chaudron", vintage "2019".',
+      '- Carruades de Lafite 2018 Pauillac → producer "Château Lafite Rothschild", wine "Pauillac", cuvee ' +
+        '"Carruades de Lafite", vintage "2018".',
+      '- Krug Grande Cuvée 172ème Édition Brut → producer "Krug", wine "Champagne", cuvee "Grande Cuvée 172ème ' +
+        'Édition Brut", vintage "".',
+      '- Torbreck RunRig 2018 Barossa Valley Shiraz Viognier → producer "Torbreck", wine "Barossa Valley Shiraz ' +
+        'Viognier", cuvee "RunRig", vintage "2018".',
+      '- Typed "rouseau gevrey 2019" → producer "Domaine Armand Rousseau", wine "Gevrey-Chambertin", cuvee "", ' +
+        'vintage "2019".',
+    ].join('\n'),
     messages: [{ role: 'user', content: content }],
     schema: labelSchema_(),
   });
@@ -1476,9 +1515,9 @@ function rowReply_(text) {
   return row;
 }
 
-// The sheet has no cuvée column, so it goes after the wine's name.
+// The sheet has no cuvée column, so it goes after the wine's name, with a space (no "·").
 function wineField_(d) {
-  return d.wine && d.cuvee ? d.wine + ' · ' + d.cuvee : d.wine || d.cuvee;
+  return [d.wine, d.cuvee].filter(Boolean).join(' ');  // "Coonawarra Shiraz Bin 128"
 }
 
 // One Claude request with `req.model`, whose answer must match `req.schema`. Returns the parsed answer.
