@@ -6,6 +6,9 @@ export const esc = v => String(v ?? "").replace(/[&<>"']/g, c =>
 
 export const bottleCount = w => w.bottles || 1;
 
+/** For search: lower case without accents, so "romanee" finds "Romanée". */
+export const fold = s => String(s ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+
 export function money(n) {
   if (n === null || n === undefined || n === "") return "";
   const whole = Number.isInteger(Number(n));

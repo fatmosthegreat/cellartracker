@@ -1,6 +1,6 @@
 // Turns state into HTML strings. Pure: no DOM access, no network. Everything user-typed goes through esc().
 import { config } from "./config.js";
-import { esc, money, formatDate, bottleCount, parseWindow, windowState } from "./format.js";
+import { esc, money, formatDate, bottleCount, fold, parseWindow, windowState } from "./format.js";
 
 const COLOUR_ORDER = { Sparkling: 0, White: 1, "Rosé": 2, Red: 3, Sweet: 4, Fortified: 5 };
 
@@ -79,8 +79,8 @@ function sortFor(status) {
 }
 
 export function listHTML(state) {
-  const q = state.q.trim().toLowerCase();
-  const matches = w => !q || [w.producer, w.wine, w.grape, w.vintage, w.colour, w.notes].join(" ").toLowerCase().includes(q);
+  const q = fold(state.q.trim());
+  const matches = w => !q || fold([w.producer, w.wine, w.grape, w.vintage, w.colour, w.notes].join(" ")).includes(q);
   const sections = SECTIONS.filter(s => state.filter === "All" || state.filter === s.status);
   let html = "";
   for (const s of sections) {
