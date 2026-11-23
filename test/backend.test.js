@@ -317,6 +317,52 @@ test('the bot ignores other chats and never answers an update twice', () => {
   assert.equal(ok('list').cellar.length, 5);
 });
 
+test('guests: let in by addTelegramGuest, look-ups only, hidden bottles stay hidden', () => {
+  const { say, sent, ok, backend, gas } = freshBot();
+  const GUEST = '777';
+  assert.throws(() => backend.addTelegramGuest(), /Nobody new/);
+  const hiddenOne = ok('list').cellar.find(w => w.status === 'In cellar');
+  ok('update', { id: hiddenOne.id, wine: { hidden: true } });
+
+  // A stranger is ignored but noted, then let in.
+  gas._fetches.length = 0;
+  const knock = { update_id: 900, message: { message_id: 1, chat: { id: Number(GUEST), first_name: 'Sam' }, text: 'hi' } };
+  assert.equal(backend.handleTelegram_(knock), false);
+  assert.equal(gas._fetches.length, 0, 'strangers get no answer');
+  backend.addTelegramGuest();
+  const welcome = gas._fetches.find(f => f.method === 'sendMessage');
+  assert.equal(String(welcome.payload.chat_id), GUEST);
+  const menus = gas._fetches.filter(f => f.method === 'setMyCommands');
+  assert.ok(!menus[0].payload.commands.some(c => c.command === 'opened'), 'the default menu has no change commands');
+  assert.equal(String(menus[1].payload.scope.chat_id), CHAT);
+  assert.ok(menus[1].payload.commands.some(c => c.command === 'opened'), 'your menu has them');
+
+  // Replies go to the guest's chat, without the hidden bottle.
+  const calls = say('/cellar', GUEST);
+  assert.ok(calls.every(f => String(f.payload.chat_id) === GUEST));
+  const guestList = sent(calls);
+  assert.ok(!guestList.includes(hiddenOne.wine), 'hidden bottle not listed for a guest');
+  assert.ok(sent(say('/cellar')).includes(hiddenOne.wine), 'you still see it');
+  assert.match(sent(say(hiddenOne.producer + ' ' + hiddenOne.wine, GUEST)), /^Nothing in the cellar matches/, 'or found by search');
+  assert.doesNotMatch(sent(say('/stats', GUEST)), /S\$809/, 'its price is left out of the value');
+  assert.match(sent(say('/stats')), /S\$809/);
+
+  // No changes, no buttons.
+  for (const cmd of ['/opened', '/drank', '/collected', '/add1']) {
+    assert.match(sent(say(cmd, GUEST)), /Only the owner/);
+  }
+  const help = sent(say('/help', GUEST));
+  assert.doesNotMatch(help, /\/opened|Reminders/);
+  assert.match(help, /\/cellar/);
+  const before = ok('list').cellar.length;
+  const tapped = backend.handleTelegram_({ update_id: 950, callback_query: { id: 'cb', data: 'drink:' + hiddenOne.id, message: { message_id: 3, chat: { id: Number(GUEST) } } } });
+  assert.equal(tapped, true);
+  assert.equal(ok('list').cellar.length, before, 'a forged button tap changes nothing');
+
+  backend.removeTelegramGuests();
+  assert.equal(say('/cellar', GUEST).length, 0, 'removed guests are ignored again');
+});
+
 test('page requests get the lists, settings and build with every response', () => {
   const { backend, gas } = freshBot();
   const res = JSON.parse(backend.doPost({ postData: { contents: '{"action":"list"}' } }).getContent());

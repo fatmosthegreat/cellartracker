@@ -26,7 +26,7 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-23.3';
+const BUILD = '2026-11-23.4';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
@@ -609,10 +609,15 @@ function sha256_(text) {
 //   Polling (fallback, replies within a minute): a timer runs pollTelegram(). Set up with installTelegram().
 // Either way an hourly timer runs sendReminders(), which sends once a day at the reminderHour
 // set in the Settings tab (so changing the hour there needs no reinstall).
-// Only your chat is answered. The token, chat id and relay secret live in Script Properties;
-// status() lists everything stored there.
+// Your chat gets everything. Guests (addTelegramGuest) can only look things up, never see hidden
+// bottles and get no reminders. Every other chat is ignored. The token, chat ids and relay secret
+// live in Script Properties; status() lists everything stored there.
 
 const BOT = { maxButtons: 30 };
+
+// Who sent the message being handled: { chatId, guest }. Set only inside handleTelegram_.
+let TG_VIEWER_ = null;
+function guestView_() { return !!(TG_VIEWER_ && TG_VIEWER_.guest); }
 
 // Run once from the editor. Paste your token, run, then put the placeholder back.
 function setTelegram() {
@@ -688,6 +693,39 @@ function uninstallTelegram() {
   replaceTrigger_('pollTelegram', null);
   replaceTrigger_('sendReminders', null);
   Logger.log('Commands and reminders are off.');
+}
+
+// Lets someone else use the bot to look things up. They send the bot any message first (it won't
+// answer them yet), then you run this. They can't change anything or see hidden bottles.
+function addTelegramGuest() {
+  const props = PropertiesService.getScriptProperties();
+  let who = null;
+  try { who = JSON.parse(props.getProperty('TG_LAST_STRANGER') || 'null'); } catch (err) { who = null; }
+  if (!who || !who.id) throw new Error('Nobody new has messaged the bot. Ask them to send it "hi", then run this again.');
+  const guests = telegramGuests_().filter(function (g) { return g.id !== who.id; });
+  guests.push(who);
+  props.setProperties({ TELEGRAM_GUESTS: JSON.stringify(guests) });
+  props.deleteProperty('TG_LAST_STRANGER');
+  setBotCommands_();
+  telegramSend_('Welcome to the cellar 🍷 You can look things up here. Try /help.', null, who.id);
+  Logger.log('Added ' + who.name + ' (' + who.id + '). Guests now: ' + guests.map(function (g) { return g.name; }).join(', '));
+}
+
+// Takes every guest off the bot. Your own chat keeps working.
+function removeTelegramGuests() {
+  const names = telegramGuests_().map(function (g) { return g.name; });
+  PropertiesService.getScriptProperties().deleteProperty('TELEGRAM_GUESTS');
+  Logger.log(names.length ? 'Removed: ' + names.join(', ') : 'There were no guests.');
+}
+
+// [{ id, name }]
+function telegramGuests_() {
+  try {
+    const list = JSON.parse(PropertiesService.getScriptProperties().getProperty('TELEGRAM_GUESTS') || '[]');
+    return Array.isArray(list) ? list : [];
+  } catch (err) {
+    return [];
+  }
 }
 
 // Shows what Telegram reports: messages waiting, and the last error if there was one.
@@ -810,9 +848,15 @@ function relayTelegram_(req) {
   }
 }
 
+// Everyone sees the look-up commands in the menu; your chat also sees the ones that change things.
 function setBotCommands_() {
-  telegramApi_('setMyCommands', { commands: Object.keys(TG_COMMANDS).filter(function (c) { return TG_COMMANDS[c].menu; })
-    .map(function (c) { return { command: c, description: TG_COMMANDS[c].help }; }) });
+  const menu = function (guest) {
+    return Object.keys(TG_COMMANDS).filter(function (c) { return TG_COMMANDS[c].menu && !(guest && TG_COMMANDS[c].owner); })
+      .map(function (c) { return { command: c, description: TG_COMMANDS[c].help }; });
+  };
+  telegramApi_('setMyCommands', { commands: menu(true) });
+  const owner = PropertiesService.getScriptProperties().getProperty('TELEGRAM_CHAT_ID');
+  if (owner) telegramApi_('setMyCommands', { commands: menu(false), scope: { type: 'chat', chat_id: owner } });
 }
 
 /* ---------- Reminders ---------- */
@@ -941,27 +985,30 @@ const TG_COMMANDS = {
     return { text: [
       '<b>' + sum(recs.filter(function (w) { return w.status === 'In cellar'; })) + '</b> in the cellar',
       '<b>' + sum(recs.filter(function (w) { return w.status === 'To collect'; })) + '</b> to collect',
-      '<b>' + readRows_(table_('Consumed')).length + '</b> consumed',
+      '<b>' + readRows_(table_('Consumed')).filter(function (r) { return !guestView_() || !r.rec.hidden; }).length + '</b> consumed',
       '<b>' + escH_(lookups_().settings.currency) + money_(value) + '</b> on the shelf',
     ].join('\n') };
   } },
-  opened: { menu: true, help: 'Record a bottle you opened', run: function (q) {
+  // `owner` commands change the cellar, so guests can't use them.
+  opened: { menu: true, owner: true, help: 'Record a bottle you opened', run: function (q) {
     return pickBottle_('drink', q, cellarRecs_(), 'Which one did you open?');
   } },
-  collected: { menu: true, help: 'Mark a bottle as collected', run: function (q) {
+  collected: { menu: true, owner: true, help: 'Mark a bottle as collected', run: function (q) {
     return pickBottle_('coll', q, cellarRecs_().filter(function (w) { return w.status === 'To collect'; }), 'Which one did you collect?');
   } },
-  add1: { menu: true, help: 'Add another bottle of a wine', run: function (q) {
+  add1: { menu: true, owner: true, help: 'Add another bottle of a wine', run: function (q) {
     return pickBottle_('add1', q, cellarRecs_(), 'Which wine did you buy another bottle of?');
   } },
   help: { menu: true, help: 'What I can do', run: function () {
-    return { text: Object.keys(TG_COMMANDS).filter(function (c) { return TG_COMMANDS[c].menu; })
+    const guest = guestView_();
+    return { text: Object.keys(TG_COMMANDS).filter(function (c) { return TG_COMMANDS[c].menu && !(guest && TG_COMMANDS[c].owner); })
       .map(function (c) { return '/' + c + ' · ' + escH_(TG_COMMANDS[c].help); }).join('\n') +
-      '\n\nOr just type a name to search. Reminders arrive at ' + lookups_().settings.reminderHour + ':00 when something is due.' };
+      '\n\nOr just type a name to search.' +
+      (guest ? '' : ' Reminders arrive at ' + lookups_().settings.reminderHour + ':00 when something is due.') };
   } },
 };
 TG_COMMANDS.start = { help: '', run: TG_COMMANDS.help.run };
-TG_COMMANDS.drank = { help: '', run: TG_COMMANDS.opened.run };  // the old name still works
+TG_COMMANDS.drank = { owner: true, help: '', run: TG_COMMANDS.opened.run };  // the old name still works
 
 // What tapping a bottle's button does. Each returns the text that replaces the buttons.
 const TG_ACTIONS = {
@@ -987,8 +1034,29 @@ function handleTelegram_(update) {
   if (!update || typeof update.update_id !== 'number') return false;
   const cb = update.callback_query;
   const msg = update.message || (cb && cb.message);
-  const chatId = props.getProperty('TELEGRAM_CHAT_ID');
-  if (!msg || !msg.chat || !chatId || String(msg.chat.id) !== chatId) return false;
+  const ownerId = props.getProperty('TELEGRAM_CHAT_ID');
+  if (!msg || !msg.chat || !ownerId) return false;
+  const chatId = String(msg.chat.id);
+  const guest = chatId !== ownerId;
+  if (guest && !telegramGuests_().some(function (g) { return String(g.id) === chatId; })) {
+    // Not answered, but remembered, so addTelegramGuest() can let them in.
+    if (update.message) {
+      const c = msg.chat;
+      const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || c.title || c.username || 'someone';
+      props.setProperties({ TG_LAST_STRANGER: JSON.stringify({ id: chatId, name: name }) });
+    }
+    return false;
+  }
+  TG_VIEWER_ = { chatId: chatId, guest: guest };
+  try {
+    return answerTelegram_(update, msg, chatId, guest, props);
+  } finally {
+    TG_VIEWER_ = null;
+  }
+}
+
+function answerTelegram_(update, msg, chatId, guest, props) {
+  const cb = update.callback_query;
 
   // Each update is handled once only. Relayed updates can arrive out of order (two quick taps),
   // so this remembers the ids it has seen rather than just the newest.
@@ -1009,6 +1077,7 @@ function handleTelegram_(update) {
     let text;
     try {
       const m = /^(drink|coll|add1):(\w+)$/.exec(cb.data || '');
+      if (guest) throw new Error('Only the owner can change the cellar.');
       if (!m) throw new Error('That button has expired.');
       const found = findIn_(table_('Cellar'), m[2]);
       if (!found) throw new Error('That bottle is no longer in the cellar.');
@@ -1026,10 +1095,11 @@ function handleTelegram_(update) {
   const cmd = TG_COMMANDS[name];
   try {
     if (!cmd) throw new Error('I don\'t know /' + name + '. Try /help.');
+    if (guest && cmd.owner) throw new Error('Only the owner can change the cellar.');
     const reply = cmd.run(arg);
-    telegramSendLong_(reply.text, reply.buttons);
+    telegramSendLong_(reply.text, reply.buttons, chatId);
   } catch (err) {
-    telegramSend_('⚠️ ' + escH_(botError_(err)));
+    telegramSend_('⚠️ ' + escH_(botError_(err)), null, chatId);
   }
   return true;
 }
@@ -1073,8 +1143,11 @@ function bottleLine_(w, short) {
     (n > 1 && !short ? ' ×' + n : '') + (w.window && !short ? ' · drink ' + escH_(w.window) : '');
 }
 
+// Guests never see hidden bottles, in lists, searches or counts.
 function cellarRecs_() {
-  return sortCellar_(readRows_(table_('Cellar')).map(function (r) { return r.rec; }));
+  const guest = guestView_();
+  return sortCellar_(readRows_(table_('Cellar')).map(function (r) { return r.rec; })
+    .filter(function (w) { return !guest || !w.hidden; }));
 }
 
 // Every word must appear somewhere, ignoring case and accents: "duroche 2018" finds "Duroché … 2018".
@@ -1120,8 +1193,9 @@ function telegramApi_(method, payload) {
   return body;
 }
 
-function telegramSend_(text, buttons) {
-  const chatId = PropertiesService.getScriptProperties().getProperty('TELEGRAM_CHAT_ID');
+// Sends to `chatId`, or to your chat when it's left out (reminders, set-up messages).
+function telegramSend_(text, buttons, toChat) {
+  const chatId = toChat || PropertiesService.getScriptProperties().getProperty('TELEGRAM_CHAT_ID');
   if (!chatId) throw new Error('No Telegram chat yet. Run findTelegramChatId().');
   const payload = { chat_id: chatId, text: text, parse_mode: 'HTML', disable_web_page_preview: true };
   if (buttons) payload.reply_markup = { inline_keyboard: buttons };
@@ -1129,7 +1203,7 @@ function telegramSend_(text, buttons) {
 }
 
 // Telegram caps a message at 4096 characters, so long lists go out in parts, split between lines.
-function telegramSendLong_(text, buttons) {
+function telegramSendLong_(text, buttons, toChat) {
   const parts = [];
   let cur = '';
   String(text).split('\n').forEach(function (line) {
@@ -1137,7 +1211,7 @@ function telegramSendLong_(text, buttons) {
     cur = cur ? cur + '\n' + line : line;
   });
   parts.push(cur);
-  parts.forEach(function (p, i) { telegramSend_(p, i === parts.length - 1 ? buttons : null); });
+  parts.forEach(function (p, i) { telegramSend_(p, i === parts.length - 1 ? buttons : null, toChat); });
 }
 
 // Replaces any timer for `fn`; `schedule` sets the new one up, or null just removes it.

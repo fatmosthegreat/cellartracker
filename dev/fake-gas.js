@@ -192,7 +192,7 @@ function loadBackend(gas, codeSource) {
   const names = Object.keys(gas).filter(k => !k.startsWith('_'));
   const factory = new Function(...names,
     codeSource + '\n;return { handle_, doGet, doPost, setup, migrate, sha256_, SCHEMA,' +
-    ' handleTelegram_, sendReminders_, remindersDue_, installTelegram, uninstallTelegram, findTelegramChatId, pollTelegram,' +
+    ' handleTelegram_, addTelegramGuest, removeTelegramGuests, sendReminders_, remindersDue_, installTelegram, uninstallTelegram, findTelegramChatId, pollTelegram,' +
     ' relaySecret, installTelegramRelay_, sendReminders, status, lookups_, checkKey_, BUILD,' +
     ' table_, readRows_, writeRow_, encode_, withLock_, adjustBottles_ };');
   return factory(...names.map(n => gas[n]));

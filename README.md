@@ -31,5 +31,6 @@ It's set out like a restaurant wine list: what's in the cellar, what's on its wa
   - reminders when a wine's drinking window opens
   - a reminder six months before a window closes
   - a reminder when bottles are due to be collected
+  - guests I invite can look up the cellar too, without seeing hidden bottles or changing anything
 
 The list is read-only for visitors. The data lives in a Google Sheet.
