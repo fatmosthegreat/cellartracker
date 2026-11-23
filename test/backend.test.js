@@ -348,7 +348,7 @@ test('guests: let in by addTelegramGuest, look-ups only, hidden bottles stay hid
   assert.match(sent(say('/stats')), /S\$809/);
 
   // No changes, no buttons.
-  for (const cmd of ['/opened', '/drank', '/collected', '/add1']) {
+  for (const cmd of ['/opened', '/collected', '/add1']) {
     assert.match(sent(say(cmd, GUEST)), /Only the owner/);
   }
   const help = sent(say('/help', GUEST));
@@ -359,8 +359,18 @@ test('guests: let in by addTelegramGuest, look-ups only, hidden bottles stay hid
   assert.equal(tapped, true);
   assert.equal(ok('list').cellar.length, before, 'a forged button tap changes nothing');
 
+  // A one-off message reaches the guest, with a copy to you.
+  assert.throws(() => backend.messageGuests(), /Type your message/);
+  gas._fetches.length = 0;
+  assert.deepEqual(backend.messageGuests_('Dinner on <b>Friday</b>?'), ['Sam']);
+  const out = gas._fetches.filter(f => f.method === 'sendMessage');
+  assert.deepEqual(out.map(f => String(f.payload.chat_id)), [GUEST, CHAT]);
+  assert.equal(out[0].payload.text, 'Dinner on <b>Friday</b>?');
+  assert.match(out[1].payload.text, /Sent to Sam/);
+
   backend.removeTelegramGuests();
   assert.equal(say('/cellar', GUEST).length, 0, 'removed guests are ignored again');
+  assert.throws(() => backend.messageGuests_('hi'), /no guests/);
 });
 
 test('page requests get the lists, settings and build with every response', () => {
@@ -393,7 +403,6 @@ test('/stats, /collect and /help answer', () => {
   assert.match(sent(say('/stats')), /<b>4<\/b> in the cellar\n<b>1<\/b> to collect\n<b>1<\/b> consumed\n<b>S\$809<\/b> on the shelf/);
   assert.match(sent(say('/collect')), /A F Gros[\s\S]*Grand Cru, collect Fri 27 Nov/);
   assert.match(sent(say('/help')), /\/opened/);
-  assert.doesNotMatch(sent(say('/help')), /\/drank/, 'the old name works but is not advertised');
 });
 
 test('a long /cellar is split into messages under the Telegram limit', () => {
@@ -407,9 +416,9 @@ test('a long /cellar is split into messages under the Telegram limit', () => {
   assert.ok(msgs.map(m => m.payload.text).join('\n').includes('Producer 119'));
 });
 
-test('/drank shows buttons, and tapping one drinks it exactly like the website', () => {
+test('/opened shows buttons, and tapping one drinks it exactly like the website', () => {
   const { say, tap, sent, buttons, ok, byName } = freshBot();
-  const btns = buttons(say('/drank duroche'));
+  const btns = buttons(say('/opened duroche'));
   assert.equal(btns.length, 1);
   assert.match(btns[0].text, /2018 Duroche Vosne-Romanée/);
   const done = tap(btns[0].callback_data);
@@ -419,12 +428,12 @@ test('/drank shows buttons, and tapping one drinks it exactly like the website',
   assert.equal(byName(res.cellar, 'Duroche').length, 0);
   assert.equal(byName(res.consumed, 'Duroche').length, 1);
   assert.match(sent(tap(btns[0].callback_data)), /no longer in the cellar/, 'a second tap is refused');
-  assert.match(sent(say('/drank nothing-like-this')), /Nothing matches/);
+  assert.match(sent(say('/opened nothing-like-this')), /Nothing matches/);
 });
 
 test('a failed tap acknowledgement still replaces the buttons, so a bottle is never drunk twice', () => {
   const { say, tap, sent, buttons, gas } = freshBot();
-  const btn = buttons(say('/drank jadot'))[0];
+  const btn = buttons(say('/opened jadot'))[0];
   gas._replies.answerCallbackQuery = () => ({ ok: false, description: 'query is too old' });
   assert.match(sent(tap(btn.callback_data)), /Opened .*Jadot/);
 });
@@ -501,7 +510,7 @@ test('installTelegramRelay points Telegram at the Worker with the secret and sto
   assert.throws(() => backend.installTelegramRelay_('https://cellar-relay.me.workers.dev'), /relaySecret\(\) first/);
   const secret = backend.relaySecret();
   assert.throws(() => backend.installTelegramRelay_('http://cellar-relay.me.workers.dev'), /https/);
-  gas.PropertiesService.getScriptProperties().setProperties({ TELEGRAM_URL: 'old', TELEGRAM_SECRET: 'old', TG_LAST_UPDATE: '5' });
+  gas.PropertiesService.getScriptProperties().setProperties({ TG_LAST_UPDATE: '5' });
   gas._fetches.length = 0;
   backend.installTelegramRelay_('https://cellar-relay.me.workers.dev');
   const hook = gas._fetches.find(f => f.method === 'setWebhook').payload;
@@ -510,7 +519,7 @@ test('installTelegramRelay points Telegram at the Worker with the secret and sto
   assert.ok(/^[A-Za-z0-9_-]{1,256}$/.test(secret), 'Telegram accepts the secret format');
   assert.deepEqual(gas._triggers.map(t => [t.fn, t.schedule]), [['sendReminders', { everyHours: 1 }]]);
   const left = gas.PropertiesService.getScriptProperties().getKeys();
-  for (const k of ['TELEGRAM_URL', 'TELEGRAM_SECRET', 'TG_LAST_UPDATE']) assert.ok(!left.includes(k), k + ' is cleaned up');
+  assert.ok(!left.includes('TG_LAST_UPDATE'), 'polling\'s bookmark is cleaned up');
   backend.installTelegramRelay_('https://relay.example.com/telegram');  // any https address, e.g. a custom domain
 });
 
@@ -552,6 +561,165 @@ test('findTelegramChatId saves the chat of the last message', () => {
   backend.findTelegramChatId();
   assert.equal(gas.PropertiesService.getScriptProperties().getProperty('TELEGRAM_CHAT_ID'), '777');
   assert.equal(gas._fetches.at(-1).payload.chat_id, '777');
+});
+
+/* ---------- Label photos ---------- */
+
+// A bot that reads labels, with canned answers from Claude and Telegram.
+// `label` and `fixed` are what Claude answers to a label and to a fix.
+function labelBot({ keys = true } = {}) {
+  const c = freshBot();
+  if (keys) c.gas.PropertiesService.getScriptProperties().setProperties({ ANTHROPIC_API_KEY: 'sk-ant-test' });
+  let messageId = 50;
+  let updateId = 1000;
+  c.gas._replies.sendMessage = () => ({ ok: true, result: { message_id: ++messageId } });
+  c.gas._replies.getFile = () => ({ ok: true, result: { file_path: 'photos/file_1.jpg' } });
+  c.answers = {
+    label: { readable: true, producer: 'Domaine Duroché', wine: 'Gevrey-Chambertin 1er Cru', cuvee: 'Lavaut St-Jacques',
+      vintage: '2019', colour: 'Red', grape: 'Pinot Noir' },
+  };
+  c.gas._replies.anthropic = p => {
+    const reply = Array.isArray(p.messages[0].content) ? c.answers.label : c.answers.fixed;
+    return { content: [{ type: 'text', text: JSON.stringify(reply) }], stop_reason: 'end_turn', usage: { input_tokens: 1 } };
+  };
+  const from = chat => ({ message_id: ++messageId, chat: { id: Number(chat || CHAT) } });
+  c.photo = (caption, chat) => c.post({ update_id: ++updateId, message: { ...from(chat), caption,
+    photo: [{ file_id: 'small', width: 90, height: 120 }, { file_id: 'big', width: 960, height: 1280 }] } });
+  c.reply = (to, text) => c.post({ update_id: ++updateId, message: { ...from(), text, reply_to_message: { message_id: to } } });
+  c.press = (data, onMessage, chat) => c.post({ update_id: ++updateId,
+    callback_query: { id: 'cb', data, message: { message_id: onMessage, chat: { id: Number(chat || CHAT) } } } });
+  c.calls = (calls, method) => calls.filter(f => f.method === method);
+  c.lastMessageId = () => messageId;
+  // The draft's buttons by action, as { Add: 'lbl:ok:…', … }, their labels, and the id of the
+  // message they sit on.
+  const ACTION = { ok: 'Add', fix: 'Fix', retry: 'Retry', no: 'Cancel' };
+  c.draft = calls => {
+    const shown = calls.filter(f => f.payload.reply_markup && f.payload.reply_markup.inline_keyboard).at(-1);
+    const map = {};
+    const labels = {};
+    shown.payload.reply_markup.inline_keyboard.flat().forEach(b => {
+      const name = ACTION[b.callback_data.split(':')[1]];
+      map[name] = b.callback_data;
+      labels[name] = b.text;
+    });
+    return { buttons: map, labels, text: shown.payload.text, messageId: shown.payload.message_id || messageId };
+  };
+  return c;
+}
+
+test('a label photo becomes a draft with one Claude call, and ✅ Add puts it in the cellar', () => {
+  const c = labelBot();
+  const calls = c.photo('Bought at Wine Co');
+  assert.match(c.sent(calls), /Reading the label/);
+
+  const reads = c.calls(calls, 'anthropic');
+  assert.equal(reads.length, 1, 'only the label is read: no web search');
+  const read = reads[0];
+  assert.equal(read.payload.model, 'claude-haiku-5-5', 'Haiku reads labels first');
+  assert.equal(read.payload.fallbacks, undefined, 'Haiku has no refusal fallback');
+  assert.equal(read.headers['anthropic-beta'], undefined);
+  assert.equal(read.payload.tools, undefined);
+  assert.equal(read.headers['x-api-key'], 'sk-ant-test');
+  assert.equal(read.payload.messages[0].content[0].type, 'image');
+  assert.equal(read.payload.messages[0].content[0].source.data, '/9j/4A==', 'the photo is sent as base64');
+  assert.match(read.payload.messages[0].content[1].text, /Bought at Wine Co/);
+  assert.deepEqual(read.payload.output_config.format.schema.properties.colour.enum.slice(0, 2), ['Sparkling', 'White'], 'colours come from the Lists tab');
+  assert.equal(c.calls(calls, 'getFile')[0].payload.file_id, 'big');
+
+  const draft = c.draft(calls);
+  assert.match(draft.text, /2019<\/b> Domaine Duroché · <i>Gevrey-Chambertin 1er Cru · Lavaut St-Jacques/);
+  assert.match(draft.text, /No drinking window yet[\s\S]*Reply to this message with the drinking window/);
+  assert.deepEqual(Object.keys(draft.buttons), ['Add', 'Fix', 'Retry', 'Cancel']);
+  assert.equal(draft.labels.Retry, '🔁 Retry with Sonnet');
+  assert.equal(c.ok('list').cellar.length, 5, 'nothing is added before you tap');
+
+  // Typing the window is free: no Claude call.
+  const typed = c.reply(draft.messageId, '2027-2040');
+  assert.equal(c.calls(typed, 'anthropic').length, 0);
+  const withWindow = c.draft(typed);
+  assert.match(withWindow.text, /Drink 2027–2040/);
+
+  assert.match(c.sent(c.press(withWindow.buttons.Add, withWindow.messageId)), /Added .*Duroché/);
+  const added = c.byName(c.ok('list').cellar, 'Domaine Duroché')[0];
+  assert.equal(added.wine, 'Gevrey-Chambertin 1er Cru · Lavaut St-Jacques');
+  assert.equal(added.vintage, 2019);
+  assert.equal(added.window, '2027–2040');
+  assert.equal(added.colour, 'Red');
+  assert.equal(added.notes, 'Bought at Wine Co');
+  assert.match(c.sent(c.press(withWindow.buttons.Add, withWindow.messageId)), /expired/, 'a draft is added once only');
+
+  // The same wine again, added without a window, adds a bottle to the row you have.
+  const again = c.draft(c.photo('Bought at Wine Co'));
+  assert.match(c.sent(c.press(again.buttons.Add, again.messageId)), /now ×2/);
+  assert.equal(c.byName(c.ok('list').cellar, 'Domaine Duroché').length, 1);
+});
+
+test('a reply that is not just a window is a fix that Claude applies; Retry keeps the window', () => {
+  const c = labelBot();
+  const first = c.draft(c.photo());
+  c.answers.fixed = { ...c.answers.label, vintage: '2018', window: '' };
+
+  const calls = c.reply(first.messageId, 'vintage 2018');
+  const fix = c.calls(calls, 'anthropic')[0];
+  assert.equal(fix.payload.model, 'claude-haiku-5-5', 'fixes use Haiku');
+  assert.match(fix.payload.messages[0].content, /Change: vintage 2018/);
+  assert.match(fix.payload.messages[0].content, /"vintage":"2019"/);
+  assert.match(c.sent(calls), /Changed, see below/);
+  const fixed = c.draft(calls);
+  assert.match(fixed.text, /<b>2018<\/b>/);
+
+  // ✏️ asks what to change; answering that question works too.
+  const ask = c.calls(c.press(fixed.buttons.Fix, fixed.messageId), 'sendMessage');
+  assert.equal(ask[0].payload.reply_markup.force_reply, true);
+  const own = c.reply(c.lastMessageId(), 'drink 2030 to 2045');
+  assert.equal(c.calls(own, 'anthropic').length, 0);
+  const windowed = c.draft(own);
+  assert.match(windowed.text, /Drink 2030–2045\n/);
+
+  // A reply with a window and more is a fix, and Claude's window is used.
+  c.answers.fixed = { ...c.answers.label, vintage: '2017', window: '2026-2034' };
+  const both = c.reply(windowed.messageId, 'vintage 2017, drink 2026-2034');
+  assert.equal(c.calls(both, 'anthropic').length, 1);
+  assert.match(c.draft(both).text, /<b>2017<\/b>[\s\S]*Drink 2026–2034/);
+
+  // Retry reads the label again with Sonnet, with its refusal fallback, and keeps the window you typed.
+  const latest = c.draft(both);
+  const retried = c.press(latest.buttons.Retry, latest.messageId);
+  assert.match(c.sent(retried), /again with Sonnet/);
+  const [again] = c.calls(retried, 'anthropic');
+  assert.equal(again.payload.model, 'claude-sonnet-5-5');
+  assert.equal(again.payload.fallbacks, 'default');
+  assert.equal(again.headers['anthropic-beta'], 'server-side-fallback-2026-07-01');
+  const afterRetry = c.draft(retried);
+  assert.match(afterRetry.text, /<b>2019<\/b>[\s\S]*Drink 2026–2034/);
+  assert.equal(afterRetry.labels.Retry, '🔁 Retry', 'already read by Sonnet');
+});
+
+test('label photos: guests are refused, keys are needed, and an unreadable photo can be retried or cancelled', () => {
+  const c = labelBot({ keys: false });
+  assert.match(c.sent(c.photo()), /Run setLabelReader\(\)/);
+  assert.throws(() => c.backend.setLabelReader(), /Paste your Anthropic API key/);
+
+  const props = c.gas.PropertiesService.getScriptProperties();
+  props.setProperties({ ANTHROPIC_API_KEY: 'sk-ant-test', TELEGRAM_GUESTS: JSON.stringify([{ id: '555', name: 'Sam' }]) });
+  const guest = c.photo(undefined, '555');
+  assert.match(c.sent(guest), /Only the owner/);
+  assert.equal(c.calls(guest, 'anthropic').length, 0);
+
+  c.answers.label = { readable: false, producer: '', wine: '', cuvee: '', vintage: '', colour: '', grape: '' };
+  const blurry = c.draft(c.photo());
+  assert.match(blurry.text, /couldn't read a wine label/);
+  assert.deepEqual(Object.keys(blurry.buttons), ['Retry', 'Cancel']);
+  const draftId = blurry.buttons.Retry.split(':')[2];
+  assert.match(c.sent(c.press('lbl:ok:' + draftId, blurry.messageId, '555')), /Only the owner/, 'a guest can\'t tap a draft');
+
+  c.answers.label = { readable: true, producer: 'Jadot', wine: 'Beaune', cuvee: '', vintage: '', colour: 'Red', grape: '' };
+  const retried = c.draft(c.press(blurry.buttons.Retry, blurry.messageId));
+  assert.match(retried.text, /<b>NV<\/b> Jadot · <i>Beaune<\/i>/);
+  assert.equal(c.calls(c.press(retried.buttons.Retry, blurry.messageId), 'getFile')[0].payload.file_id, 'big', 'retry reads the same photo');
+
+  assert.match(c.sent(c.press(retried.buttons.Cancel, blurry.messageId)), /Cancelled/);
+  assert.equal(c.ok('list').cellar.length, 5);
 });
 
 /* ---------- Reminders ---------- */
@@ -628,29 +796,6 @@ test('migrate creates the Lists, Settings and Reminders log tabs, and never over
   assert.deepEqual(res.lists.colours.at(-1), { name: 'Orange', tone: 'white' });
 });
 
-test('migrate renames an old "Drunk" tab and its drunkOn column to Consumed, keeping every row', () => {
-  const { backend, gas, ok } = freshCellar();
-  const jadot = ok('list').cellar.find(w => w.producer === 'Jadot');
-  ok('drink', { id: jadot.id, drink: { consumedOn: '2026-10-01', rating: 9 } });
-  const sheet = gas._spreadsheet.getSheetByName('Consumed');
-  sheet.setName('Drunk');  // make it look like an older sheet
-  const at = sheet.rows[0].indexOf('consumedOn');
-  sheet.rows[0][at] = 'drunkOn';
-  assert.match(backend.handle_({ action: 'list' }).error, /No "Consumed" tab/, 'new code on an old sheet needs migrate()');
-
-  backend.migrate();
-  assert.equal(gas._spreadsheet.getSheetByName('Drunk'), null);
-  assert.equal(gas._spreadsheet.getSheetByName('Consumed'), sheet, 'same tab, renamed');
-  assert.equal(sheet.rows[0][at], 'consumedOn', 'same column, renamed');
-  assert.equal(sheet.rows[0].filter(h => /On$/.test(h) && h !== 'consumedOn').length, 0, 'no extra column added');
-  const res = ok('list');
-  assert.equal(res.consumed.length, 2);
-  const opened = res.consumed.find(w => w.producer === 'Jadot');
-  assert.deepEqual([opened.consumedOn, opened.rating], ['2026-10-01', 9]);
-  backend.migrate();  // running it again changes nothing
-  assert.equal(ok('list').consumed.length, 2);
-});
-
 test('colour, grape and storage are saved in the Lists spelling; values not in a list are kept', () => {
   const { ok, tab } = freshCellar();
   tab('Lists').rows.push(['Orange', 'Rosé', '', "Friend's fridge"]);
@@ -664,13 +809,12 @@ test('colour, grape and storage are saved in the Lists spelling; values not in a
   assert.deepEqual([other.colour, other.grape], ['Amber', 'Tocai Friulano']);
 });
 
-test('prices accept any currency in front, and "-" storage reads as blank', () => {
+test('prices accept any currency in front', () => {
   const { ok } = freshCellar();
   const price = p => ok('create', { wine: { producer: 'P' + p, wine: 'W', price: p } }).cellar.find(w => w.producer === 'P' + p).price;
   assert.equal(price('€ 1,250'), 1250);
   assert.equal(price('$45.50'), 45.5);
   assert.equal(price('USD 80'), 80);
-  assert.equal(ok('list').cellar.find(w => w.producer === 'Jadot').storage, null, 'the sample bottles use "-"');
 });
 
 test('Settings drive the currency and reminder timing; bad values fall back and status() says so', () => {
@@ -705,18 +849,15 @@ test('the hourly timer sends once a day, from the reminder hour', () => {
   assert.equal(gas._fetches.filter(f => f.method === 'sendMessage').length, 1);
 });
 
-test('the reminder log is a sheet tab, so hundreds of bottles are fine; an old property is moved across', () => {
+test('the reminder log is a sheet tab, so hundreds of bottles are fine', () => {
   const { backend, gas, ok, tab } = freshBot();
   const props = gas.PropertiesService.getScriptProperties();
   const jadot = ok('list').cellar.find(w => w.producer === 'Jadot');
-  props.setProperties({ REMINDERS_SENT: JSON.stringify({ [jadot.id + '|open|2023']: '2026-12-31' }) });
   for (let i = 0; i < 300; i++) ok('create', { wine: { producer: 'Producer ' + i, wine: 'Cuvée', vintage: 2020, window: '2027–2035' } });
 
   const sentCount = backend.sendReminders_('2027-01-01');
   assert.ok(sentCount >= 301, 'every bottle opening in 2027 is reminded');
-  assert.equal(props.getProperty('REMINDERS_SENT'), null, 'the old property is gone');
   const logged = tab('Reminders log').rows.slice(1).map(r => r[0]);
-  assert.ok(logged.includes(jadot.id + '|open|2023'), 'and its contents were kept');
   assert.ok(logged.length > 300);
   gas._fetches.length = 0;
   assert.equal(backend.sendReminders_('2027-01-01'), 0, 'nothing repeats');

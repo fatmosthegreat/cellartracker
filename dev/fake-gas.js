@@ -104,6 +104,10 @@ function createFakeGas() {
       }),
       // Apps Script returns signed bytes (-128..127); match that.
       computeDigest: (_alg, text) => sha256Bytes(text).map(b => (b > 127 ? b - 256 : b)),
+      base64Encode: bytes => {
+        const s = bytes.map(b => String.fromCharCode(b & 255)).join('');
+        return typeof btoa === 'function' ? btoa(s) : Buffer.from(s, 'binary').toString('base64');
+      },
       DigestAlgorithm: { SHA_256: 'SHA_256' },
       Charset: { UTF_8: 'UTF_8' },
       formatDate: (d, _tz, fmt) => (fmt === 'H' ? String(d.getHours()) : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`),
@@ -131,13 +135,25 @@ function createFakeGas() {
     },
     Session: { getScriptTimeZone: () => 'Asia/Singapore' },
     Logger: { log() {} },
+    // Calls are recorded as { method, payload, url, headers }. `method` is the Telegram method, or
+    // 'anthropic' or 'tgfile' (a photo download). A reply may set _status for an HTTP error.
     UrlFetchApp: {
       fetch: (url, opts) => {
-        const method = url.split('/').pop();
+        const method = /api\.anthropic\.com/.test(url) ? 'anthropic'
+          : /api\.telegram\.org\/file\//.test(url) ? 'tgfile' : url.split('/').pop();
         const payload = JSON.parse((opts && opts.payload) || '{}');
-        fetches.push({ method, payload });
-        const body = replies[method] ? replies[method](payload) : { ok: true, result: method === 'getUpdates' ? [] : true };
-        return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+        fetches.push({ method, payload, url, headers: (opts && opts.headers) || {} });
+        const body = replies[method] ? replies[method](payload)
+          : method === 'tgfile' ? { _bytes: [255, 216, 255, 224] }  // the start of a JPEG
+          : { ok: true, result: method === 'getUpdates' ? [] : true };
+        const status = (body && body._status) || 200;
+        const bytes = (body && body._bytes) || [];
+        return {
+          getResponseCode: () => status,
+          getContentText: () => JSON.stringify(body),
+          getContent: () => bytes.slice(),
+          getBlob: () => ({ getBytes: () => bytes.slice() }),
+        };
       },
     },
     ScriptApp: {
@@ -168,17 +184,16 @@ function createFakeGas() {
 
 // Sample bottles that demo mode and the tests start from: backend.setup(SAMPLE_BOTTLES).
 // Not used by the live app; your real bottles live in the Google Sheet.
-// "-" as a storage place is what older sheets used for "nowhere in particular"; it reads as blank.
 const SAMPLE_BOTTLES = {
   cellar: [
     { producer: 'Leflaive', wine: 'Bourgogne Blanc', vintage: 2022, colour: 'White', grape: 'Chardonnay',
-      window: '2024–2030', bottles: 1, status: 'In cellar', storage: '-', price: 150 },
+      window: '2024–2030', bottles: 1, status: 'In cellar', price: 150 },
     { producer: 'Jadot', wine: 'Gevrey-Chambertin', vintage: 2018, colour: 'Red', grape: 'Pinot Noir',
-      window: '2023–2033', bottles: 1, status: 'In cellar', storage: '-', price: 140 },
+      window: '2023–2033', bottles: 1, status: 'In cellar', price: 140 },
     { producer: 'Duroche', wine: 'Vosne-Romanée', vintage: 2018, colour: 'Red', grape: 'Pinot Noir',
-      window: '2024–2035', bottles: 1, status: 'In cellar', storage: '-', price: 152 },
+      window: '2024–2035', bottles: 1, status: 'In cellar', price: 152 },
     { producer: 'Coudray-Bizot', wine: 'Vosne-Romanée 1er Cru La Croix Rameau', vintage: 2020, colour: 'Red',
-      grape: 'Pinot Noir', window: '2027–2040', bottles: 1, status: 'In cellar', storage: '-', price: 313 },
+      grape: 'Pinot Noir', window: '2027–2040', bottles: 1, status: 'In cellar', price: 313 },
     { producer: 'A F Gros', wine: 'Moulin-à-Vent', vintage: 2023, colour: 'Red', grape: 'Gamay',
       window: '2025–2029', bottles: 1, status: 'To collect', storage: 'Grand Cru, collect Fri 27 Nov', price: 54 },
   ],
@@ -192,8 +207,8 @@ function loadBackend(gas, codeSource) {
   const names = Object.keys(gas).filter(k => !k.startsWith('_'));
   const factory = new Function(...names,
     codeSource + '\n;return { handle_, doGet, doPost, setup, migrate, sha256_, SCHEMA,' +
-    ' handleTelegram_, addTelegramGuest, removeTelegramGuests, sendReminders_, remindersDue_, installTelegram, uninstallTelegram, findTelegramChatId, pollTelegram,' +
-    ' relaySecret, installTelegramRelay_, sendReminders, status, lookups_, checkKey_, BUILD,' +
+    ' handleTelegram_, addTelegramGuest, removeTelegramGuests, messageGuests, messageGuests_, sendReminders_, remindersDue_, installTelegram, uninstallTelegram, findTelegramChatId, pollTelegram,' +
+    ' setLabelReader, relaySecret, installTelegramRelay_, sendReminders, status, lookups_, checkKey_, BUILD,' +
     ' table_, readRows_, writeRow_, encode_, withLock_, adjustBottles_ };');
   return factory(...names.map(n => gas[n]));
 }

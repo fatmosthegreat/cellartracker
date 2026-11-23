@@ -28,6 +28,7 @@ It's set out like a restaurant wine list: what's in the cellar, what's on its wa
 - **Hide from friends:** keep particular bottles out of the public list.
 - **Telegram bot:**
   - look up the cellar and record bottles from Telegram
+  - send a photo of a label to add that bottle: the bot reads the label and shows a draft to check, fix or retry, and I reply with the drinking window before adding it
   - reminders when a wine's drinking window opens
   - a reminder six months before a window closes
   - a reminder when bottles are due to be collected

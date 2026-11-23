@@ -26,7 +26,7 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-23.4';
+const BUILD = '2026-11-23.10';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
@@ -144,7 +144,6 @@ function setup(sample) {
 function migrate() {
   freshReads_();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  renameOld_(ss);
   if (!ss.getSheetByName(LOOKUP_TABS.lists)) {
     const l = DEFAULT_LISTS;
     const rows = Math.max(l.colours.length, l.grapes.length, 1);
@@ -175,18 +174,6 @@ function migrate() {
   const blank = ss.getSheetByName('Sheet1');
   if (blank && blank.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(blank);
   freshReads_();
-}
-
-// Older sheets called the Consumed tab "Drunk" and its date column "drunkOn". Renames them in
-// place, so every row stays as it is. Does nothing on a sheet that's already up to date.
-function renameOld_(ss) {
-  const old = ss.getSheetByName('Drunk');
-  if (old && !ss.getSheetByName('Consumed')) old.setName('Consumed');
-  const sh = ss.getSheetByName('Consumed');
-  if (!sh || sh.getLastColumn() < 1) return;
-  const header = sh.getRange(1, 1, 1, sh.getLastColumn()).getDisplayValues()[0].map(trim_);
-  const at = header.indexOf('drunkOn');
-  if (at >= 0 && header.indexOf('consumedOn') < 0) sh.getRange(1, at + 1).setValues([['consumedOn']]);
 }
 
 // Replaces a whole tab with `values` (first row is the header), as plain text.
@@ -368,7 +355,6 @@ function cleanValue_(field, value) {
   if (rule.type === 'bool') return value === true || value === 'true' || value === 'TRUE';
   if (isBlank_(value)) return null;
   const s = String(value).trim();
-  if (field === 'storage' && s === '-') return null;  // older rows used "-" for "nowhere in particular"
   if (rule.type === 'int' || rule.type === 'number') {
     // Drop thousands separators and any currency in front: "S$1,200", "$45", "€ 30", "USD 80".
     const n = Number(s.replace(/[,\s]/g, '').replace(/^[^\d.\-]+/, ''));
@@ -394,9 +380,7 @@ function matchList_(s, list) {
 
 // "Jadot | Gevrey-Chambertin | 2018" and "jadot | gevrey chambertin | 2018" are the same wine.
 function wineKey_(w) {
-  const norm = function (s) {
-    return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  };
+  const norm = function (s) { return fold_(s).replace(/[^a-z0-9]+/g, ' ').trim(); };
   return [norm(w.producer), norm(w.wine), w.vintage || 'nv'].join('|');
 }
 
@@ -474,7 +458,7 @@ function parseCell_(field, text) {
   const rule = FIELD_RULES[field] || {};
   const s = text === null || text === undefined ? '' : String(text);
   if (rule.type === 'bool') return /^true$/i.test(s);
-  if (s === '' || (field === 'storage' && s.trim() === '-')) return null;
+  if (s === '') return null;
   if (rule.type === 'int' || rule.type === 'number') {
     const n = Number(s.replace(/[^0-9.\-]/g, ''));
     return isFinite(n) ? n : null;
@@ -615,10 +599,6 @@ function sha256_(text) {
 
 const BOT = { maxButtons: 30 };
 
-// Who sent the message being handled: { chatId, guest }. Set only inside handleTelegram_.
-let TG_VIEWER_ = null;
-function guestView_() { return !!(TG_VIEWER_ && TG_VIEWER_.guest); }
-
 // Run once from the editor. Paste your token, run, then put the placeholder back.
 function setTelegram() {
   const token = 'paste-your-bot-token-here';
@@ -648,7 +628,6 @@ function installTelegram() {
   setBotCommands_();
   replaceTrigger_('pollTelegram', function (b) { return b.everyMinutes(1); });
   replaceTrigger_('sendReminders', function (b) { return b.everyHours(1); });
-  forgetOldSettings_(false);
   Logger.log('Done. Try /help in Telegram; replies take up to a minute. Reminders go out at ' +
     lookups_().settings.reminderHour + ':00 (Project Settings time zone) when something is due.');
 }
@@ -683,7 +662,7 @@ function installTelegramRelay_(workerUrl) {
   setBotCommands_();
   replaceTrigger_('pollTelegram', null);
   replaceTrigger_('sendReminders', function (b) { return b.everyHours(1); });
-  forgetOldSettings_(true);
+  PropertiesService.getScriptProperties().deleteProperty('TG_LAST_UPDATE');  // polling's bookmark
   Logger.log('Done. Try /help in Telegram; replies should take a few seconds. If nothing comes back, run installTelegram() to go back to checking every minute.');
 }
 
@@ -709,6 +688,31 @@ function addTelegramGuest() {
   setBotCommands_();
   telegramSend_('Welcome to the cellar 🍷 You can look things up here. Try /help.', null, who.id);
   Logger.log('Added ' + who.name + ' (' + who.id + '). Guests now: ' + guests.map(function (g) { return g.name; }).join(', '));
+}
+
+// Sends a one-off message to every guest. Type it below, run, then put the placeholder back.
+// Simple formatting works: <b>bold</b>, <i>italic</i>. A copy comes to you too, so you can see it went.
+function messageGuests() {
+  const text = 'type-your-message-here';
+  if (text === 'type-your-message-here') throw new Error('Type your message into messageGuests(), then run it again.');
+  messageGuests_(text);
+}
+
+function messageGuests_(text) {
+  const guests = telegramGuests_();
+  if (!guests.length) throw new Error('There are no guests yet. Add one with addTelegramGuest().');
+  const sent = [];
+  guests.forEach(function (g) {
+    try {
+      telegramSend_(text, null, g.id);
+      sent.push(g.name);
+    } catch (err) {
+      Logger.log('Couldn\'t send to ' + g.name + ': ' + ((err && err.message) || err));
+    }
+  });
+  if (sent.length) telegramSend_('📣 Sent to ' + escH_(sent.join(', ')) + ':\n\n' + text);
+  Logger.log('Sent to ' + (sent.length ? sent.join(', ') : 'nobody') + '. Now put the placeholder back.');
+  return sent;
 }
 
 // Takes every guest off the bot. Your own chat keeps working.
@@ -740,7 +744,6 @@ function telegramStatus() {
 // Telegram, the time zone, and any Settings-tab values that were ignored.
 function status() {
   freshReads_();
-  forgetOldSettings_(false);
   const out = [];
   const say = function (s) { out.push(s); };
 
@@ -769,7 +772,7 @@ function status() {
 
   say('Time zone: ' + Session.getScriptTimeZone() + ' (today is ' + today_() + '). Reminders and "opened today" use this.');
 
-  const secret = ['PASS_SALT', 'PASS_HASH', 'TELEGRAM_TOKEN', 'TELEGRAM_RELAY_SECRET'];
+  const secret = ['PASS_SALT', 'PASS_HASH', 'TELEGRAM_TOKEN', 'TELEGRAM_RELAY_SECRET', 'ANTHROPIC_API_KEY'];
   const props = PropertiesService.getScriptProperties().getProperties();
   say('Stored settings (Project Settings → Script properties):');
   Object.keys(props).sort().forEach(function (k) {
@@ -799,14 +802,6 @@ function status() {
 
   Logger.log(out.join('\n'));
   return out;
-}
-
-// Removes Script Properties that older versions of this script used and nothing reads now.
-// TG_LAST_UPDATE is only needed while polling, so it goes when the relay is installed.
-function forgetOldSettings_(relayOn) {
-  const props = PropertiesService.getScriptProperties();
-  ['TELEGRAM_URL', 'TELEGRAM_SECRET'].concat(relayOn ? ['TG_LAST_UPDATE'] : [])
-    .forEach(function (k) { if (props.getProperty(k) !== null) props.deleteProperty(k); });
 }
 
 // The hourly timer calls this. It sends at most once a day, from the reminderHour in Settings.
@@ -848,11 +843,15 @@ function relayTelegram_(req) {
   }
 }
 
+// The commands listed for a guest (look-ups only) or for you (everything).
+function menuCommands_(guest) {
+  return Object.keys(TG_COMMANDS).filter(function (c) { return TG_COMMANDS[c].menu && !(guest && TG_COMMANDS[c].owner); });
+}
+
 // Everyone sees the look-up commands in the menu; your chat also sees the ones that change things.
 function setBotCommands_() {
   const menu = function (guest) {
-    return Object.keys(TG_COMMANDS).filter(function (c) { return TG_COMMANDS[c].menu && !(guest && TG_COMMANDS[c].owner); })
-      .map(function (c) { return { command: c, description: TG_COMMANDS[c].help }; });
+    return menuCommands_(guest).map(function (c) { return { command: c, description: TG_COMMANDS[c].help }; });
   };
   telegramApi_('setMyCommands', { commands: menu(true) });
   const owner = PropertiesService.getScriptProperties().getProperty('TELEGRAM_CHAT_ID');
@@ -891,15 +890,9 @@ function sendReminders_(today, hour) {
   return due.length;
 }
 
-// Reminders already sent, as { key: date }, from the hidden "Reminders log" tab. (They used to be
-// kept in one Script Property, which is capped at 9 KB; an old one is moved across here.)
+// Reminders already sent, as { key: date }, from the hidden "Reminders log" tab.
 function readReminderLog_() {
-  const props = PropertiesService.getScriptProperties();
   const sent = {};
-  const old = props.getProperty('REMINDERS_SENT');
-  if (old) {
-    try { Object.assign(sent, JSON.parse(old)); } catch (err) { /* unreadable: start fresh */ }
-  }
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(LOOKUP_TABS.log);
   if (sh && sh.getLastRow() > 1) {
     sh.getRange(2, 1, sh.getLastRow() - 1, 2).getDisplayValues().forEach(function (r) {
@@ -914,7 +907,6 @@ function writeReminderLog_(sent) {
   let sh = ss.getSheetByName(LOOKUP_TABS.log);
   if (!sh) sh = ss.insertSheet(LOOKUP_TABS.log).hideSheet();
   writeTab_(sh, [['key', 'sentOn']].concat(Object.keys(sent).sort().map(function (k) { return [k, sent[k]]; })));
-  PropertiesService.getScriptProperties().deleteProperty('REMINDERS_SENT');
 }
 
 // Pure: which reminders are due today. `sent` holds the keys already sent, so nothing repeats.
@@ -952,63 +944,64 @@ function remindersDue_(recs, today, sent, settings) {
 
 /* ---------- Commands ---------- */
 
-// `menu` commands show in Telegram's command list. `run` gets the text after the command.
+// `menu` commands show in Telegram's command list. `run(q, recs, guest)` gets the text after the
+// command, the cellar bottles the sender may see (guests never see hidden ones), and whether the
+// sender is a guest.
 const TG_COMMANDS = {
-  cellar: { menu: true, help: 'Everything in the cellar', run: function () { return { text: cellarText_(cellarRecs_()) }; } },
-  ready: { menu: true, help: 'In its drinking window now', run: function () {
+  cellar: { menu: true, help: 'Everything in the cellar', run: function (q, recs) { return { text: cellarText_(recs) }; } },
+  ready: { menu: true, help: 'In its drinking window now', run: function (q, recs) {
     const year = Number(today_().slice(0, 4));
-    const recs = cellarRecs_().filter(function (w) { const win = parseWindow_(w.window); return win && win.from <= year && year <= win.to; });
-    return { text: listText_('Ready to drink', recs, 'Nothing is in its drinking window right now.') };
+    const ready = recs.filter(function (w) { const win = parseWindow_(w.window); return win && win.from <= year && year <= win.to; });
+    return { text: listText_('Ready to drink', ready, 'Nothing is in its drinking window right now.') };
   } },
-  closing: { menu: true, help: 'Windows ending this year or next', run: function () {
+  closing: { menu: true, help: 'Windows ending this year or next', run: function (q, recs) {
     const year = Number(today_().slice(0, 4));
-    const recs = cellarRecs_().filter(function (w) { const win = parseWindow_(w.window); return win && (win.to === year || win.to === year + 1); })
+    const soon = recs.filter(function (w) { const win = parseWindow_(w.window); return win && (win.to === year || win.to === year + 1); })
       .sort(function (a, b) { return parseWindow_(a.window).to - parseWindow_(b.window).to; });
-    return { text: listText_('Drink soon', recs, 'No windows end this year or next.', true) };
+    return { text: listText_('Drink soon', soon, 'No windows end this year or next.', true) };
   } },
-  collect: { menu: true, help: 'Bottles to collect', run: function () {
-    const recs = cellarRecs_().filter(function (w) { return w.status === 'To collect'; });
-    if (!recs.length) return { text: 'Nothing to collect.' };
-    return { text: '<b>To collect</b>\n\n' + recs.map(function (w) {
+  collect: { menu: true, help: 'Bottles to collect', run: function (q, recs) {
+    const due = recs.filter(function (w) { return w.status === 'To collect'; });
+    if (!due.length) return { text: 'Nothing to collect.' };
+    return { text: '<b>To collect</b>\n\n' + due.map(function (w) {
       return bottleLine_(w) + (w.collectBy ? '\nCollect by ' + niceDate_(w.collectBy) : '') +
         (w.storage ? '\n' + escH_(w.storage) : '');
     }).join('\n\n') };
   } },
-  search: { menu: true, help: 'Find a bottle, e.g. /search romanee', run: function (q) {
+  search: { menu: true, help: 'Find a bottle, e.g. /search romanee', run: function (q, recs) {
     if (!q) return { text: 'Type what to look for, e.g. /search romanee' };
-    return { text: listText_('Matches for “' + escH_(q) + '”', searchRecs_(cellarRecs_(), q), 'Nothing in the cellar matches “' + escH_(q) + '”.') };
+    return { text: listText_('Matches for “' + escH_(q) + '”', searchRecs_(recs, q), 'Nothing in the cellar matches “' + escH_(q) + '”.') };
   } },
-  stats: { menu: true, help: 'Bottle counts and value', run: function () {
-    const recs = cellarRecs_();
-    const sum = function (list) { return list.reduce(function (n, w) { return n + (w.bottles || 1); }, 0); };
+  stats: { menu: true, help: 'Bottle counts and value', run: function (q, recs, guest) {
+    const sum = function (status) {
+      return recs.reduce(function (n, w) { return n + (w.status === status ? w.bottles || 1 : 0); }, 0);
+    };
     const value = recs.reduce(function (n, w) { return n + (w.price || 0) * (w.bottles || 1); }, 0);
     return { text: [
-      '<b>' + sum(recs.filter(function (w) { return w.status === 'In cellar'; })) + '</b> in the cellar',
-      '<b>' + sum(recs.filter(function (w) { return w.status === 'To collect'; })) + '</b> to collect',
-      '<b>' + readRows_(table_('Consumed')).filter(function (r) { return !guestView_() || !r.rec.hidden; }).length + '</b> consumed',
+      '<b>' + sum('In cellar') + '</b> in the cellar',
+      '<b>' + sum('To collect') + '</b> to collect',
+      '<b>' + readRows_(table_('Consumed')).filter(function (r) { return !guest || !r.rec.hidden; }).length + '</b> consumed',
       '<b>' + escH_(lookups_().settings.currency) + money_(value) + '</b> on the shelf',
     ].join('\n') };
   } },
   // `owner` commands change the cellar, so guests can't use them.
-  opened: { menu: true, owner: true, help: 'Record a bottle you opened', run: function (q) {
-    return pickBottle_('drink', q, cellarRecs_(), 'Which one did you open?');
+  opened: { menu: true, owner: true, help: 'Record a bottle you opened', run: function (q, recs) {
+    return pickBottle_('drink', q, recs, 'Which one did you open?');
   } },
-  collected: { menu: true, owner: true, help: 'Mark a bottle as collected', run: function (q) {
-    return pickBottle_('coll', q, cellarRecs_().filter(function (w) { return w.status === 'To collect'; }), 'Which one did you collect?');
+  collected: { menu: true, owner: true, help: 'Mark a bottle as collected', run: function (q, recs) {
+    return pickBottle_('coll', q, recs.filter(function (w) { return w.status === 'To collect'; }), 'Which one did you collect?');
   } },
-  add1: { menu: true, owner: true, help: 'Add another bottle of a wine', run: function (q) {
-    return pickBottle_('add1', q, cellarRecs_(), 'Which wine did you buy another bottle of?');
+  add1: { menu: true, owner: true, help: 'Add another bottle of a wine', run: function (q, recs) {
+    return pickBottle_('add1', q, recs, 'Which wine did you buy another bottle of?');
   } },
-  help: { menu: true, help: 'What I can do', run: function () {
-    const guest = guestView_();
-    return { text: Object.keys(TG_COMMANDS).filter(function (c) { return TG_COMMANDS[c].menu && !(guest && TG_COMMANDS[c].owner); })
-      .map(function (c) { return '/' + c + ' · ' + escH_(TG_COMMANDS[c].help); }).join('\n') +
+  help: { menu: true, help: 'What I can do', run: function (q, recs, guest) {
+    return { text: menuCommands_(guest).map(function (c) { return '/' + c + ' · ' + escH_(TG_COMMANDS[c].help); }).join('\n') +
       '\n\nOr just type a name to search.' +
-      (guest ? '' : ' Reminders arrive at ' + lookups_().settings.reminderHour + ':00 when something is due.') };
+      (guest ? '' : ' Reminders arrive at ' + lookups_().settings.reminderHour + ':00 when something is due.' +
+        '\n📷 Send a photo of a label to add that bottle.') };
   } },
 };
 TG_COMMANDS.start = { help: '', run: TG_COMMANDS.help.run };
-TG_COMMANDS.drank = { owner: true, help: '', run: TG_COMMANDS.opened.run };  // the old name still works
 
 // What tapping a bottle's button does. Each returns the text that replaces the buttons.
 const TG_ACTIONS = {
@@ -1047,12 +1040,7 @@ function handleTelegram_(update) {
     }
     return false;
   }
-  TG_VIEWER_ = { chatId: chatId, guest: guest };
-  try {
-    return answerTelegram_(update, msg, chatId, guest, props);
-  } finally {
-    TG_VIEWER_ = null;
-  }
+  return answerTelegram_(update, msg, chatId, guest, props);
 }
 
 function answerTelegram_(update, msg, chatId, guest, props) {
@@ -1074,6 +1062,11 @@ function answerTelegram_(update, msg, chatId, guest, props) {
     // Acknowledge first: if this fails (e.g. a stale tap), the buttons must still be replaced below,
     // or a second tap could drink another bottle.
     try { telegramApi_('answerCallbackQuery', { callback_query_id: cb.id }); } catch (err) { Logger.log(String(err.message)); }
+    const lbl = /^lbl:(\w+):(\w+)$/.exec(cb.data || '');
+    if (lbl && DRAFT_ACTIONS[lbl[1]]) {
+      labelTap_(lbl[1], lbl[2], msg, chatId, guest);
+      return true;
+    }
     let text;
     try {
       const m = /^(drink|coll|add1):(\w+)$/.exec(cb.data || '');
@@ -1089,6 +1082,19 @@ function answerTelegram_(update, msg, chatId, guest, props) {
     return true;
   }
 
+  // A label photo starts a draft bottle; a reply to a draft changes it.
+  if ((msg.photo && msg.photo.length) || (msg.document && /^image\//.test(msg.document.mime_type || ''))) {
+    if (guest) telegramSend_('⚠️ Only the owner can change the cellar.', null, chatId);
+    else if (!msg.photo) telegramSend_('Send it as a photo rather than a file, and I\'ll read the label.', null, chatId);
+    else labelFromPhoto_(msg, chatId);
+    return true;
+  }
+  const draft = !guest && msg.text && msg.reply_to_message ? draftForMessage_(msg.reply_to_message.message_id) : null;
+  if (draft) {
+    fixFromReply_(draft, String(msg.text).trim(), chatId);
+    return true;
+  }
+
   const m = /^\/(\w+)(?:@\w+)?\s*([\s\S]*)$/.exec(String(msg.text || '').trim());
   const name = m ? m[1].toLowerCase() : 'search';
   const arg = m ? m[2].trim() : String(msg.text || '').trim();
@@ -1096,7 +1102,7 @@ function answerTelegram_(update, msg, chatId, guest, props) {
   try {
     if (!cmd) throw new Error('I don\'t know /' + name + '. Try /help.');
     if (guest && cmd.owner) throw new Error('Only the owner can change the cellar.');
-    const reply = cmd.run(arg);
+    const reply = cmd.run(arg, cellarRecs_(guest), guest);
     telegramSendLong_(reply.text, reply.buttons, chatId);
   } catch (err) {
     telegramSend_('⚠️ ' + escH_(botError_(err)), null, chatId);
@@ -1144,8 +1150,7 @@ function bottleLine_(w, short) {
 }
 
 // Guests never see hidden bottles, in lists, searches or counts.
-function cellarRecs_() {
-  const guest = guestView_();
+function cellarRecs_(guest) {
   return sortCellar_(readRows_(table_('Cellar')).map(function (r) { return r.rec; })
     .filter(function (w) { return !guest || !w.hidden; }));
 }
@@ -1167,6 +1172,311 @@ function sortCellar_(recs) {
   return recs.slice().sort(function (a, b) {
     return rank(a) - rank(b) || String(a.producer).localeCompare(String(b.producer)) || (a.vintage || 0) - (b.vintage || 0);
   });
+}
+
+/* ---------- Label photos: add a bottle from a photo of its label ---------- */
+//
+// Send the bot a photo of a label. Claude Haiku reads producer, wine, cuvée, vintage, colour and
+// grape, and the bot shows a draft with ✅ Add, ✏️ Fix, 🔁 Retry with Sonnet and ❌ Cancel. Nothing
+// is added until you tap Add. Retry reads the label again with Sonnet, the stronger and costlier
+// model, for labels Haiku gets wrong. You give the drinking window yourself by replying to the
+// draft with it ("2028-2040"); that needs no Claude call. Any other reply ("vintage 2019") is a
+// fix, which one short Haiku call applies. Cost: about US$0.0005 a label, about US$0.01 a Retry.
+// Set up with setLabelReader(). Drafts are kept in the TG_DRAFTS Script Property (newest 10).
+
+const LABEL = {
+  reader: 'claude-haiku-5-5', retry: 'claude-sonnet-5-5', fixer: 'claude-haiku-5-5',
+  apiVersion: '2026-10-21', maxDrafts: 10,
+};
+const DRAFT_FIELDS = ['producer', 'wine', 'cuvee', 'vintage', 'colour', 'grape'];
+
+// Run once from the editor. Paste your key, run, then put the placeholder back.
+// (Or add ANTHROPIC_API_KEY yourself under Project Settings → Script properties.)
+function setLabelReader() {
+  const anthropicKey = 'paste-your-anthropic-key-here';
+  if (anthropicKey.indexOf('paste-') === 0) throw new Error('Paste your Anthropic API key into setLabelReader(), then run it again.');
+  if (!/^sk-ant-[\w-]{20,}$/.test(anthropicKey)) throw new Error('That doesn\'t look like an Anthropic API key. It starts with sk-ant-.');
+  PropertiesService.getScriptProperties().setProperties({ ANTHROPIC_API_KEY: anthropicKey });
+  Logger.log('Saved. Send your bot a photo of a label. Put the placeholder back afterwards.');
+}
+
+function labelFromPhoto_(msg, chatId) {
+  if (!PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY')) {
+    telegramSend_('⚠️ I can\'t read labels yet. Run setLabelReader() in Apps Script first.', null, chatId);
+    return;
+  }
+  const d = { id: newId_().slice(0, 8), fileId: pickPhoto_(msg.photo).file_id, hint: trim_(msg.caption || ''), chatId: chatId, window: '' };
+  d.msgId = messageId_(telegramSend_('🔍 Reading the label…', null, chatId));
+  try {
+    readDraft_(d, LABEL.reader);
+  } catch (err) {
+    d.problem = botError_(err);
+  }
+  showDraft_(d);
+}
+
+// Telegram sends each photo in several sizes, smallest first. About 1600px is plenty for a label,
+// and bigger ones cost more to read.
+function pickPhoto_(sizes) {
+  const fit = sizes.filter(function (s) { return Math.max(s.width || 0, s.height || 0) <= 1600; });
+  return fit.length ? fit[fit.length - 1] : sizes[0];
+}
+
+// Reads the photo (again) with `model`. A window you've already typed is kept. `d.problem` says
+// what went wrong, or is '' when the draft can be added. Throws if Telegram or Claude can't be reached.
+function readDraft_(d, model) {
+  d.readBy = model;
+  const got = readLabel_(downloadPhoto_(d.fileId), d.hint, model);
+  DRAFT_FIELDS.forEach(function (k) { d[k] = trim_(got[k] || ''); });
+  d.problem = got.readable && d.producer ? '' : 'I couldn\'t read a wine label in that photo.';
+}
+
+function downloadPhoto_(fileId) {
+  const file = telegramApi_('getFile', { file_id: fileId }).result;
+  const token = PropertiesService.getScriptProperties().getProperty('TELEGRAM_TOKEN');
+  const res = UrlFetchApp.fetch('https://api.telegram.org/file/bot' + token + '/' + file.file_path, { muteHttpExceptions: true });
+  if (res.getResponseCode() !== 200) throw new Error('Couldn\'t download the photo from Telegram. Try 🔁 Retry.');
+  return { media_type: /\.png$/i.test(file.file_path) ? 'image/png' : 'image/jpeg', data: Utilities.base64Encode(res.getContent()) };
+}
+
+function readLabel_(photo, hint, model) {
+  return claude_({
+    model: model,
+    system: 'You read wine labels for a cellar list. Copy names as printed, with their accents. producer: the ' +
+      'domaine, château or house. wine: the appellation or wine name with its classification, e.g. "Vosne-Romanée ' +
+      '1er Cru". cuvee: the vineyard or cuvée name if there is one, else "". vintage: the four-digit year, or "" if ' +
+      'non-vintage or not shown. colour: from the label or what you know of the wine, or "" if unsure. grape: the ' +
+      'main grape or grapes, spelt like this where they fit: ' + lookups_().lists.grapes.join(', ') + '. Leave a ' +
+      'field "" rather than guess. readable: false if the photo is not a wine label or can\'t be read.',
+    messages: [{ role: 'user', content: [
+      { type: 'image', source: { type: 'base64', media_type: photo.media_type, data: photo.data } },
+      { type: 'text', text: hint ? 'A note from the owner about this bottle: ' + hint : 'Read this label.' },
+    ] }],
+    schema: labelSchema_(false),
+  });
+}
+
+// The colours come from the Lists tab, like everywhere else.
+function labelSchema_(withWindow) {
+  const str = { type: 'string' };
+  const colours = lookups_().lists.colours.map(function (c) { return c.name; }).concat(['']);
+  const props = { readable: { type: 'boolean' }, producer: str, wine: str, cuvee: str, vintage: str,
+    colour: { type: 'string', enum: colours }, grape: str };
+  if (withWindow) props.window = str;
+  return { type: 'object', additionalProperties: false, required: Object.keys(props), properties: props };
+}
+
+// "2026-2035" → "2026–2035", the way the sheet writes it. Anything else is dropped.
+function cleanWindow_(text) {
+  const win = parseWindow_(text);
+  return win && win.from >= 1900 ? win.from + '–' + win.to : '';
+}
+
+// A reply that is just a window ("2028-2040", "drink 2028 to 2040"): two years and nothing
+// else with digits in it, so "vintage 2019, drink 2028-2040" still goes to Claude as a fix.
+function windowReply_(text) {
+  return /^\D*\d{4}\D+\d{4}\D*$/.test(text) ? cleanWindow_(text) : '';
+}
+
+// The sheet has no cuvée column, so it goes after the wine's name.
+function wineField_(d) {
+  return d.wine && d.cuvee ? d.wine + ' · ' + d.cuvee : d.wine || d.cuvee;
+}
+
+// One Claude request with `req.model`, whose answer must match `req.schema`. Returns the parsed answer.
+function claude_(req) {
+  const key = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
+  if (!key) throw new Error('I can\'t read labels yet. Run setLabelReader() in Apps Script first.');
+  const body = {
+    model: req.model, max_tokens: 4000, system: req.system, messages: req.messages,
+    output_config: { effort: 'low', format: { type: 'json_schema', schema: req.schema } },
+  };
+  const headers = { 'x-api-key': key, 'anthropic-version': LABEL.apiVersion };
+  if (!/haiku/.test(req.model)) {  // Haiku has no refusal fallback; for Sonnet, another model answers if it declines
+    body.fallbacks = 'default';
+    headers['anthropic-beta'] = 'server-side-fallback-2026-07-01';
+  }
+  const res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: headers, payload: JSON.stringify(body),
+  });
+  const code = res.getResponseCode();
+  let out = null;
+  try { out = JSON.parse(res.getContentText()); } catch (err) { out = null; }
+  if (code !== 200 || !out || !out.content) {
+    const why = out && out.error && out.error.message ? out.error.message : 'HTTP ' + code;
+    Logger.log('Claude error: ' + why);
+    if (code === 401) throw new Error('Claude didn\'t accept the API key. Run setLabelReader() again.');
+    if (/credit balance/i.test(why)) throw new Error('Your Anthropic credit has run out. Top up at console.anthropic.com.');
+    throw new Error('Claude didn\'t answer (' + why + ').');
+  }
+  if (out.usage) Logger.log('Claude usage (' + req.model + '): ' + JSON.stringify(out.usage));
+  if (out.stop_reason === 'refusal') throw new Error('Claude declined to read that one.');
+  if (out.stop_reason === 'max_tokens') throw new Error('Claude\'s answer was cut short.');
+  const texts = out.content.filter(function (b) { return b.type === 'text'; });
+  try {
+    return JSON.parse(texts[texts.length - 1].text);
+  } catch (err) {
+    throw new Error('Claude\'s answer didn\'t make sense.');
+  }
+}
+
+/* Drafts waiting for a tap */
+
+function drafts_() {
+  try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('TG_DRAFTS') || '{}'); } catch (err) { return {}; }
+}
+
+// Changes the stored drafts under the lock, keeping the newest LABEL.maxDrafts.
+function editDrafts_(change) {
+  withLock_(function () {
+    const all = drafts_();
+    change(all);
+    const keep = {};
+    Object.keys(all).sort(function (a, b) { return String(all[b].saved).localeCompare(String(all[a].saved)); })
+      .slice(0, LABEL.maxDrafts).forEach(function (k) { keep[k] = all[k]; });
+    PropertiesService.getScriptProperties().setProperties({ TG_DRAFTS: JSON.stringify(keep) });
+  });
+}
+
+function saveDraft_(d) {
+  d.saved = timestamp_();
+  editDrafts_(function (all) { all[d.id] = d; });
+}
+
+function dropDraft_(id) { editDrafts_(function (all) { delete all[id]; }); }
+
+// The draft a message belongs to: the draft itself, or the bot's "What should change?" question.
+function draftForMessage_(messageId) {
+  const all = drafts_();
+  return Object.keys(all).map(function (k) { return all[k]; })
+    .filter(function (d) { return d.msgId === messageId || d.askId === messageId; })[0] || null;
+}
+
+function messageId_(res) { return res && res.result && res.result.message_id ? res.result.message_id : null; }
+
+// Shows the draft in its own message (editing it in place), or as a new message when `fresh`.
+function showDraft_(d, fresh) {
+  const view = draftView_(d);
+  let edited = false;
+  if (d.msgId && !fresh) {
+    try {
+      telegramApi_('editMessageText', { chat_id: d.chatId, message_id: d.msgId, text: view.text, parse_mode: 'HTML',
+        disable_web_page_preview: true, reply_markup: { inline_keyboard: view.buttons } });
+      edited = true;
+    } catch (err) {
+      Logger.log(botError_(err));
+    }
+  }
+  if (!edited) d.msgId = messageId_(telegramSend_(view.text, view.buttons, d.chatId));
+  saveDraft_(d);
+}
+
+function draftView_(d) {
+  const btn = function (act, text) { return { text: text, callback_data: 'lbl:' + act + ':' + d.id }; };
+  const retry = btn('retry', d.readBy === LABEL.retry ? '🔁 Retry' : '🔁 Retry with Sonnet');
+  if (d.problem) {
+    return { text: '⚠️ ' + escH_(d.problem) + '\nTry 🔁 Retry, or send a clearer photo.', buttons: [[retry, btn('no', '❌ Cancel')]] };
+  }
+  const lines = ['🍷 <b>' + escH_(d.vintage || 'NV') + '</b> ' + escH_(d.producer) + ' · <i>' + escH_(wineField_(d)) + '</i>'];
+  const kind = [d.colour, d.grape].filter(Boolean).join(' · ');
+  if (kind) lines.push(escH_(kind));
+  lines.push(d.window ? 'Drink ' + escH_(d.window) : 'No drinking window yet.');
+  if (d.hint) lines.push('Note: ' + escH_(d.hint));
+  lines.push('', d.window ? 'Tap ✅ to add it, or ✏️ to change something.'
+    : 'Reply to this message with the drinking window (e.g. <i>2028-2040</i>), or tap ✅ to add it without one.');
+  const buttons = [[btn('ok', '✅ Add'), btn('fix', '✏️ Fix')], [retry, btn('no', '❌ Cancel')]];
+  return { text: lines.join('\n'), buttons: buttons };
+}
+
+function draftWine_(d) {
+  return { producer: d.producer, wine: wineField_(d), vintage: d.vintage, colour: d.colour, grape: d.grape,
+    window: d.window, notes: d.hint };
+}
+
+// What tapping a draft's button does. Each gets the draft and `edit(text, buttons)`, which
+// replaces the draft message.
+const DRAFT_ACTIONS = {
+  ok: function (d, edit) {
+    const res = withLock_(function () { return createWine_(draftWine_(d)); });
+    dropDraft_(d.id);
+    const line = bottleLine_({ vintage: d.vintage, producer: d.producer, wine: wineField_(d) }, true);
+    edit(res.merged ? '➕ ' + line + ' now ×' + res.bottles : '✅ Added ' + line + ' to the cellar.');
+  },
+  no: function (d, edit) {
+    dropDraft_(d.id);
+    edit('Cancelled. Nothing was added.');
+  },
+  fix: function (d) {
+    d.askId = messageId_(telegramApi_('sendMessage', { chat_id: d.chatId, parse_mode: 'HTML',
+      text: 'What should change? e.g. <i>2028-2040</i> for the drinking window, <i>vintage 2019</i> or <i>the cuvée is Les Suchots</i>',
+      reply_markup: { force_reply: true, input_field_placeholder: 'e.g. 2028-2040' } }));
+    saveDraft_(d);
+  },
+  retry: function (d, edit) {
+    edit('🔍 Reading the label again with Sonnet…');
+    readDraft_(d, LABEL.retry);
+    showDraft_(d);
+  },
+};
+
+// A tap on a draft's button. `msg` is the draft message, which each answer replaces.
+function labelTap_(act, id, msg, chatId, guest) {
+  const edit = function (text, buttons) {
+    const p = { chat_id: chatId, message_id: msg.message_id, text: text, parse_mode: 'HTML', disable_web_page_preview: true };
+    if (buttons) p.reply_markup = { inline_keyboard: buttons };
+    telegramApi_('editMessageText', p);
+  };
+  const d = guest ? null : drafts_()[id];
+  try {
+    if (guest) throw new Error('Only the owner can change the cellar.');
+    if (!d) throw new Error('That draft has expired. Send the photo again.');
+    d.chatId = chatId;
+    d.msgId = msg.message_id;
+    DRAFT_ACTIONS[act](d, edit);
+  } catch (err) {
+    const view = d ? draftView_(d) : null;
+    edit('⚠️ ' + escH_(botError_(err)) + (view ? '\n\n' + view.text : ''), view ? view.buttons : null);
+  }
+}
+
+// A reply to a draft. A drinking window ("2028-2040") is set straight away, with no Claude call.
+// Anything else ("vintage 2019") is a fix that Claude applies. The new draft goes to the bottom
+// of the chat.
+function fixFromReply_(d, text, chatId) {
+  d.chatId = chatId;
+  try {
+    if (!text) throw new Error('Type what to change, e.g. 2028-2040 or vintage 2019.');
+    const win = windowReply_(text);
+    if (win) {
+      d.window = win;
+    } else {
+      const cur = { readable: true, window: d.window || '' };
+      DRAFT_FIELDS.forEach(function (k) { cur[k] = d[k] || ''; });
+      const got = claude_({
+        model: LABEL.fixer,
+        system: 'You correct a draft entry for a wine cellar list. Apply only the change the owner asks for, and ' +
+          'keep every other field exactly as it is. window is "YYYY-YYYY" or "". Spell grapes like this where ' +
+          'they fit: ' + lookups_().lists.grapes.join(', ') + '.',
+        messages: [{ role: 'user', content: 'Draft:\n' + JSON.stringify(cur) + '\n\nChange: ' + text }],
+        schema: labelSchema_(true),
+      });
+      DRAFT_FIELDS.forEach(function (k) { d[k] = trim_(got[k] || ''); });
+      d.window = cleanWindow_(got.window);
+      d.problem = '';
+    }
+  } catch (err) {
+    telegramSend_('⚠️ ' + escH_(botError_(err)), null, chatId);
+    return;
+  }
+  if (d.msgId) {
+    try {
+      telegramApi_('editMessageText', { chat_id: chatId, message_id: d.msgId, text: '✏️ Changed, see below.' });
+    } catch (err) {
+      Logger.log(botError_(err));
+    }
+  }
+  showDraft_(d, true);
 }
 
 /* ---------- Talking to Telegram ---------- */
