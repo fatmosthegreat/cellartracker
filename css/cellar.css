@@ -161,12 +161,6 @@ h1 em { font-style: italic; color: var(--claret); }
 
 /* ---------- Drinking history (top of the Consumed section) ---------- */
 .history { display: grid; gap: 16px; padding: 10px 0 20px; border-bottom: 1px solid var(--rule); }
-.months { display: grid; grid-template-columns: repeat(12, 1fr); gap: 6px; height: 72px; }
-.month { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
-.month .bar { flex: 1; width: 100%; display: flex; align-items: flex-end; justify-content: center; }
-.month i { display: block; width: 100%; max-width: 22px; border-radius: 3px 3px 0 0; background: var(--claret); }
-.month i.zero { background: var(--rule); }
-.month small { font-size: .68rem; line-height: 1; color: var(--muted); }
 .history-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px 22px; margin: 0; font-size: .88rem; }
 .history-facts dt { font-size: .7rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
 .history-facts dd { margin: 3px 0 0; }

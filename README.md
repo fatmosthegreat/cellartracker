@@ -16,7 +16,7 @@ It's set out like a restaurant wine list: what's in the cellar, what's on its wa
 **Bottles already opened**
 - **Consumed:** every bottle opened, newest first.
 - **Tasting cards:** tap a bottle to see its rating, tasting notes, the date it was opened, the price and when it was bought.
-- **Drinking history:** bottles per month over the last year, average rating, the best bottle, and favourite producers and grapes.
+- **Drinking history:** how many bottles, average rating, money spent, the best bottle, and favourite producers and grapes.
 
 **Anywhere**
 - **Print the list:** a clean, menu-style printout of the cellar.

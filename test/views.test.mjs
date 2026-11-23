@@ -21,14 +21,8 @@ test("history: totals, average of rated bottles only, money drunk, no 'this year
   assert.match(t, /S\$288 spent/);
 });
 
-test("history: 12 monthly bars ending this month, counting only those months", () => {
-  const html = historyHTML(drunk, NOW);
-  const titles = [...html.matchAll(/class="month" title="([^"]+)"/g)].map(m => m[1]);
-  assert.equal(titles.length, 12);
-  assert.match(titles[0], /December 2025: 1 bottle$/);
-  assert.match(titles[11], /November 2026: 1 bottle$/);
-  assert.match(titles[3], /March 2026: 1 bottle$/);
-  assert.ok(!titles.some(t => /2024/.test(t)), "older bottles aren't in the bars");
+test("history: no monthly chart", () => {
+  assert.doesNotMatch(historyHTML(drunk, NOW), /class="months?"/);
 });
 
 test("history: best bottle is the highest rated, most recent wins a tie, and opens its card", () => {

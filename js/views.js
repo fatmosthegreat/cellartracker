@@ -126,31 +126,12 @@ export function listHTML(state) {
 
 const hasRating = w => w.rating !== null && w.rating !== undefined && w.rating !== "";
 
-/** Summary above the Consumed list: totals, the last 12 months, best bottle, favourites. */
+/** Summary above the Consumed list: totals, best bottle, favourites. */
 export function historyHTML(consumed, now = new Date(), currency = "") {
   if (!consumed.length) return "";
   const rated = consumed.filter(hasRating);
   const avg = rated.length ? rated.reduce((n, w) => n + Number(w.rating), 0) / rated.length : null;
   const spent = consumed.reduce((n, w) => n + (Number(w.price) || 0), 0);
-
-  const months = [];
-  for (let i = 11; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    months.push({
-      key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
-      short: d.toLocaleDateString(config.locale, { month: "narrow" }),
-      long: d.toLocaleDateString(config.locale, { month: "long", year: "numeric" }),
-      n: 0,
-    });
-  }
-  for (const w of consumed) {
-    const m = months.find(x => String(w.consumedOn || "").startsWith(x.key));
-    if (m) m.n++;
-  }
-  const most = Math.max(1, ...months.map(m => m.n));
-  const bars = months.map(m => `<span class="month" title="${esc(m.long)}: ${m.n} bottle${m.n === 1 ? "" : "s"}">
-      <span class="bar"><i class="${m.n ? "" : "zero"}" style="height:${m.n ? Math.max(8, (m.n / most) * 100) : 3}%"></i></span>
-      <small>${esc(m.short)}</small></span>`).join("");
 
   const best = rated.slice().sort((a, b) => Number(b.rating) - Number(a.rating)
     || String(b.consumedOn || "").localeCompare(String(a.consumedOn || "")))[0];
@@ -172,7 +153,6 @@ export function historyHTML(consumed, now = new Date(), currency = "") {
       ${avg === null ? "" : `<span><b>${avg.toFixed(1)}</b> average rating</span>`}
       <span><b>${esc(currency)}${money(spent)}</b> spent</span>
     </div>
-    <div class="months" role="img" aria-label="Bottles consumed per month, last 12 months">${bars}</div>
     ${facts.length ? `<dl class="history-facts">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>` : ""}
   </div>`;
 }
