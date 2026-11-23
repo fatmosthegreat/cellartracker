@@ -13,10 +13,10 @@ const drunk = [
 ];
 const text = html => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
-test("history: totals, this year, average of rated bottles only, money drunk", () => {
+test("history: totals, average of rated bottles only, money drunk, no 'this year'", () => {
   const t = text(historyHTML(drunk, NOW, "S$"));
   assert.match(t, /4 consumed/);
-  assert.match(t, /2 this year/);
+  assert.doesNotMatch(t, /this year/);
   assert.match(t, /8\.7 average rating/, "(8 + 9 + 9) / 3, the unrated bottle is left out");
   assert.match(t, /S\$288 spent/);
 });
@@ -85,7 +85,8 @@ test("colours: tone and order come from the sheet's Lists tab", () => {
 test("list: drunk bottles open their card, cellar bottles don't; history only without a search", () => {
   const state = { q: "", filter: "All", owner: false, consumed: drunk, cellar: [{ id: "k", producer: "Duroche", wine: "Vosne", vintage: 2018, status: "In cellar" }] };
   const html = listHTML(state);
-  assert.match(html, /<li class="entry consumed" data-id="a">/);
+  assert.match(html, /<li class="entry consumed" data-tone="red" data-id="a">/);
+  assert.match(listHTML({ ...state, consumed: [{ ...drunk[3], colour: "White" }] }), /<li class="entry consumed" data-tone="white" data-id="d">/, "Chardonnay rows wash in straw");
   assert.match(html, /class="title entry-open" data-act="view" data-id="a"/);
   assert.match(html, /<li class="entry" data-id="k">/);
   assert.doesNotMatch(html, /data-act="view" data-id="k"/);

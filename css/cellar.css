@@ -151,9 +151,12 @@ h1 em { font-style: italic; color: var(--claret); }
 .pill.hidden { color: var(--muted); border-style: dashed; }
 .notes { font-family: var(--display); font-style: italic; font-size: 1rem; margin: 8px 0 0; max-width: 60ch; }
 /* Consumed bottles open a tasting card, so the list just shows a one-line preview of the notes. */
-.entry.consumed { cursor: pointer; }
+/* Consumed bottles: the whole row lights up in a pale wash of the wine's colour on hover. */
+.entry.consumed { cursor: pointer; --tone: var(--claret); margin: 0 -12px; padding-left: 12px; padding-right: 12px; border-radius: 6px; transition: background-color .15s; }
+.entry.consumed[data-tone="white"] { --tone: var(--straw); }
+.entry.consumed[data-tone="rose"] { --tone: var(--rose); }
+.entry.consumed:hover, .entry.consumed:has(.entry-open:focus-visible) { background: color-mix(in srgb, var(--tone) 14%, transparent); }
 .entry-open { font: inherit; color: inherit; background: none; border: 0; padding: 0; text-align: left; cursor: pointer; }
-.entry.consumed:hover .cuvee, .entry-open:focus-visible .cuvee { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .entry.consumed .notes { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; line-clamp: 1; overflow: hidden; }
 
 /* ---------- Drinking history (top of the Consumed section) ---------- */
@@ -276,7 +279,7 @@ details[open] summary { margin-bottom: 12px; }
   .masthead { padding-bottom: 12px; }
   h1 { font-size: 34pt; }
   .group { margin-top: 18px; }
-  .entry { break-inside: avoid; padding: 9px 0; }
+  .entry, .entry.consumed { break-inside: avoid; padding: 9px 0; margin: 0; background: none; }
   .vin { font-size: 18pt; }
   .entry.consumed .notes { -webkit-line-clamp: unset; line-clamp: unset; display: block; }
 }

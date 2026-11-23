@@ -129,8 +129,6 @@ const hasRating = w => w.rating !== null && w.rating !== undefined && w.rating !
 /** Summary above the Consumed list: totals, the last 12 months, best bottle, favourites. */
 export function historyHTML(consumed, now = new Date(), currency = "") {
   if (!consumed.length) return "";
-  const year = String(now.getFullYear());
-  const thisYear = consumed.filter(w => String(w.consumedOn || "").startsWith(year)).length;
   const rated = consumed.filter(hasRating);
   const avg = rated.length ? rated.reduce((n, w) => n + Number(w.rating), 0) / rated.length : null;
   const spent = consumed.reduce((n, w) => n + (Number(w.price) || 0), 0);
@@ -171,7 +169,6 @@ export function historyHTML(consumed, now = new Date(), currency = "") {
   return `<div class="history">
     <div class="stats">
       <span><b>${consumed.length}</b> consumed</span>
-      <span><b>${thisYear}</b> this year</span>
       ${avg === null ? "" : `<span><b>${avg.toFixed(1)}</b> average rating</span>`}
       <span><b>${esc(currency)}${money(spent)}</b> spent</span>
     </div>
@@ -230,7 +227,7 @@ function entryHTML(w, source, owner, lists) {
     ? `<button type="button" class="title entry-open" data-act="view" data-id="${id}">${titleInner}</button>`
     : `<span class="title">${titleInner}</span>`;
 
-  return `<li class="entry${source === "consumed" ? " consumed" : ""}" data-id="${id}">
+  return `<li class="entry${source === "consumed" ? ` consumed" data-tone="${tone}` : ""}" data-id="${id}">
     <div class="vin${w.vintage ? "" : " nv"}" data-tone="${tone}">${w.vintage ? esc(w.vintage) : "NV"}</div>
     <div class="body">
       <div class="line">
