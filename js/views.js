@@ -51,12 +51,13 @@ export function timelineHTML(cellar, now = new Date()) {
 
   const lines = rows.map(({ w, win }) => {
     const state = windowState(w.window, year);
+    const colour = esc(String(w.colour || "").toLowerCase());
     const label = `${w.vintage || "NV"} ${w.producer}`;
     const tip = `${label} ${w.wine}: drink ${w.window}`;
     return `<div class="tl-row" title="${esc(tip)}">
-      <span class="tl-label"><b>${esc(w.vintage || "NV")}</b> ${esc(w.producer)}</span>
+      <span class="tl-label"><b data-c="${colour}">${esc(w.vintage || "NV")}</b> ${esc(w.producer)}</span>
       <span class="tl-track">${grid}${nowLine}
-        <i class="tl-bar ${state.key}" data-c="${esc(String(w.colour || "").toLowerCase())}"
+        <i class="tl-bar ${state.key}" data-c="${colour}"
            style="left:${x(win.from)};right:calc(100% - ${x(win.to + 1)})"></i>
       </span></div>`;
   }).join("");
@@ -122,7 +123,7 @@ function entryHTML(w, source, owner) {
     </div>`;
 
   return `<li class="entry" data-id="${id}">
-    <div class="vin${w.vintage ? "" : " nv"}">${w.vintage ? esc(w.vintage) : "NV"}</div>
+    <div class="vin${w.vintage ? "" : " nv"}" data-c="${esc(colour)}">${w.vintage ? esc(w.vintage) : "NV"}</div>
     <div class="body">
       <div class="line">
         <span class="title"><span class="producer">${esc(w.producer)}</span> <span class="cuvee">${esc(w.wine)}</span>${

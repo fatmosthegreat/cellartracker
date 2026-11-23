@@ -124,6 +124,9 @@ h1 em { font-style: italic; color: var(--claret); }
   font-variant-numeric: lining-nums tabular-nums; padding-top: 1px;
 }
 .vin.nv { font-size: 1.4rem; font-style: italic; padding-top: 6px; }
+/* White-wine years in straw, matching the swatch and timeline bar. */
+.vin[data-c="white"], .vin[data-c="sparkling"], .vin[data-c="sweet"],
+.tl-label b[data-c="white"], .tl-label b[data-c="sparkling"], .tl-label b[data-c="sweet"] { color: var(--straw); }
 .body { min-width: 0; }
 .line { display: flex; align-items: flex-end; align-items: last baseline; gap: 8px; }
 .title { min-width: 0; overflow-wrap: anywhere; }
