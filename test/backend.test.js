@@ -695,6 +695,164 @@ test('a reply that is not just a window is a fix that Claude applies; Retry keep
   assert.equal(afterRetry.labels.Retry, '🔁 Retry', 'already read by Sonnet');
 });
 
+test('✏️ Fix sends the whole row; the edited row comes back with no Claude call', () => {
+  const c = labelBot();
+  const first = c.draft(c.photo('Bought at Wine Co'));
+  const ask = c.calls(c.press(first.buttons.Fix, first.messageId), 'sendMessage')[0];
+  assert.equal(ask.payload.reply_markup.force_reply, true);
+  assert.match(ask.payload.text, /<pre>producer: Domaine Duroché\nwine: Gevrey-Chambertin 1er Cru\ncuvee: Lavaut St-Jacques\n/);
+  assert.match(ask.payload.text, /vintage: 2019\ncolour: Red\ngrape: Pinot Noir\nwindow: \nnotes: Bought at Wine Co<\/pre>/);
+  const askId = c.lastMessageId();
+
+  // The whole row, edited: a new vintage, a window, a cleared cuvée and a new note.
+  const edited = c.reply(askId, 'producer: Domaine Duroché\nwine: Gevrey-Chambertin\nCuvée:\nvintage: 2018\n' +
+    'colour: Red\ngrape: Pinot Noir\nwindow: 2027-2040\nnotes: magnum');
+  assert.equal(c.calls(edited, 'anthropic').length, 0, 'no Claude call');
+  const draft = c.draft(edited);
+  assert.match(draft.text, /<b>2018<\/b> Domaine Duroché · <i>Gevrey-Chambertin<\/i>\nRed · Pinot Noir\nDrink 2027–2040\nNote: magnum/);
+
+  // One line is enough; other fields stay as they are.
+  const one = c.draft(c.reply(draft.messageId, 'Color: White'));
+  assert.match(one.text, /<b>2018<\/b>[\s\S]*White · Pinot Noir\nDrink 2027–2040/);
+
+  // Mistakes are explained, and the draft is unchanged.
+  assert.match(c.sent(c.reply(one.messageId, 'vintage: 2018\nprice: 90')), /"price: 90" isn't a field/);
+  assert.match(c.sent(c.reply(one.messageId, 'window: soon')), /should look like 2028-2040/);
+  assert.match(c.sent(c.reply(one.messageId, 'vintage: 18')), /year like 2019/);
+
+  assert.match(c.sent(c.press(one.buttons.Add, one.messageId)), /Added/);
+  const added = c.byName(c.ok('list').cellar, 'Domaine Duroché')[0];
+  assert.deepEqual([added.wine, added.vintage, added.colour, added.window, added.notes], ['Gevrey-Chambertin', 2018, 'White', '2027–2040', 'magnum']);
+});
+
+test('/add looks a wine up by name with Haiku, asks for the window, and works like a photo draft', () => {
+  const c = labelBot();
+  c.answers.label = { readable: true, producer: 'Domaine Leflaive', wine: 'Bourgogne Blanc', cuvee: '',
+    vintage: '2022', colour: 'White', grape: 'Chardonnay' };
+  const calls = c.say('/add levlaie bogogne blanc 2022');
+  assert.match(c.sent(calls), /Looking up the wine/);
+  assert.equal(c.calls(calls, 'getFile').length, 0, 'no photo to download');
+  const [read] = c.calls(calls, 'anthropic');
+  assert.equal(c.calls(calls, 'anthropic').length, 1);
+  assert.equal(read.payload.model, 'claude-haiku-5-5');
+  assert.deepEqual(read.payload.messages[0].content, [{ type: 'text', text: 'The owner typed: "levlaie bogogne blanc 2022"' }]);
+
+  const draft = c.draft(calls);
+  assert.match(draft.text, /<b>2022<\/b> Domaine Leflaive · <i>Bourgogne Blanc<\/i>\nWhite · Chardonnay\nNo drinking window yet/);
+  assert.deepEqual(Object.keys(draft.buttons), ['Add', 'Fix', 'Retry', 'Cancel']);
+  assert.equal(draft.labels.Retry, '🔁 Retry with Sonnet');
+
+  // Then it asks for the window; answering that question is free.
+  const ask = c.calls(calls, 'sendMessage').at(-1);
+  assert.match(ask.payload.text, /What's the drinking window/);
+  assert.equal(ask.payload.reply_markup.force_reply, true);
+  const windowed = c.reply(c.lastMessageId(), '2024-2030');
+  assert.equal(c.calls(windowed, 'anthropic').length, 0);
+  const withWindow = c.draft(windowed);
+  assert.match(withWindow.text, /Drink 2024–2030/);
+
+  // ✏️ Fix sends the whole row, as for a photo; an edited row is applied with no Claude call.
+  const fix = c.calls(c.press(withWindow.buttons.Fix, withWindow.messageId), 'sendMessage')[0];
+  assert.match(fix.payload.text, /<pre>producer: Domaine Leflaive\nwine: Bourgogne Blanc\ncuvee: \nvintage: 2022/);
+  const edited = c.reply(c.lastMessageId(), 'cuvee: Les Sétilles');
+  assert.equal(c.calls(edited, 'anthropic').length, 0);
+  const fixed = c.draft(edited);
+  assert.match(fixed.text, /Bourgogne Blanc · Les Sétilles[\s\S]*Drink 2024–2030/);
+
+  // 🔁 Retry rereads the same typed text with Sonnet, keeps the window and doesn't ask again.
+  const retried = c.press(fixed.buttons.Retry, fixed.messageId);
+  const [again] = c.calls(retried, 'anthropic');
+  assert.equal(again.payload.model, 'claude-sonnet-5-5');
+  assert.match(again.payload.messages[0].content[0].text, /levlaie bogogne blanc 2022/);
+  assert.equal(c.calls(retried, 'getFile').length, 0);
+  assert.equal(c.calls(retried, 'sendMessage').length, 0, 'no second window question');
+  const afterRetry = c.draft(retried);
+  assert.match(afterRetry.text, /Drink 2024–2030/);
+
+  assert.match(c.sent(c.press(afterRetry.buttons.Add, afterRetry.messageId)), /Added .*Leflaive/);
+  const added = c.byName(c.ok('list').cellar, 'Domaine Leflaive').find(w => w.vintage === 2022);
+  assert.deepEqual([added.wine, added.colour, added.grape, added.window], ['Bourgogne Blanc', 'White', 'Chardonnay', '2024–2030']);
+});
+
+test('/add needs a name, is owner-only, and a wine it can\'t place gets Retry or Cancel only', () => {
+  const c = labelBot();
+  c.gas.PropertiesService.getScriptProperties().setProperties({ TELEGRAM_GUESTS: JSON.stringify([{ id: '555', name: 'Sam' }]) });
+  const bare = c.say('/add');
+  assert.match(c.sent(bare), /Type the wine after \/add/);
+  assert.equal(c.calls(bare, 'anthropic').length, 0);
+  const guest = c.say('/add rousseau gevrey 2019', '555');
+  assert.match(c.sent(guest), /Only the owner/);
+  assert.equal(c.calls(guest, 'anthropic').length, 0);
+  assert.match(c.sent(c.say('/help')), /\/add · Add a wine by name/);
+  assert.doesNotMatch(c.sent(c.say('/help', '555')), /\/add /);
+
+  c.answers.label = { readable: false, producer: '', wine: '', cuvee: '', vintage: '', colour: '', grape: '' };
+  const unknown = c.say('/add zzqx');
+  const draft = c.draft(unknown);
+  assert.match(draft.text, /couldn't tell which wine that is\.\nTry 🔁 Retry, or type it differently/);
+  assert.deepEqual(Object.keys(draft.buttons), ['Retry', 'Cancel']);
+  assert.doesNotMatch(c.sent(unknown), /drinking window/, 'no window question for a wine it couldn\'t place');
+});
+
+test('a photo draft is followed by the window question too', () => {
+  const c = labelBot();
+  const calls = c.photo();
+  assert.match(c.calls(calls, 'sendMessage').at(-1).payload.text, /What's the drinking window/);
+  const windowed = c.draft(c.reply(c.lastMessageId(), 'drink 2027 to 2040'));
+  assert.match(windowed.text, /Drink 2027–2040/);
+});
+
+test('the website\'s ✨ identify uses the same AI code, for the owner only, and checks what the browser sends', () => {
+  const c = labelBot();
+  const anthropic = () => c.gas._fetches.filter(f => f.method === 'anthropic');
+  c.gas._fetches.length = 0;
+
+  // Not logged in: refused before any Claude call.
+  assert.equal(c.friend('identify', { identify: { text: 'rousseau gevrey 2019' } }).auth, false);
+  assert.equal(anthropic().length, 0);
+
+  // Typed: Haiku, the same prompt as the bot, and the cuvée folded into the wine for the Add form.
+  const typed = c.ok('identify', { identify: { text: '  levlaie bogogne blanc 2022 ' } });
+  assert.deepEqual(typed.result, { producer: 'Domaine Duroché', wine: 'Gevrey-Chambertin 1er Cru · Lavaut St-Jacques',
+    vintage: '2019', colour: 'Red', grape: 'Pinot Noir' });
+  const [first] = anthropic();
+  assert.equal(first.payload.model, 'claude-haiku-5-5');
+  assert.match(first.payload.system, /You identify one wine for a cellar list/);
+  assert.deepEqual(first.payload.messages[0].content, [{ type: 'text', text: 'The owner typed: "levlaie bogogne blanc 2022"' }]);
+  assert.equal(c.ok('list').cellar.length, 5, 'nothing is saved');
+
+  // A photo, with the text as a note; "strong" uses Sonnet.
+  c.gas._fetches.length = 0;
+  c.ok('identify', { identify: { photo: { media_type: 'image/jpeg', data: '/9j/4A==' }, text: 'magnum', strong: true } });
+  const [photo] = anthropic();
+  assert.equal(photo.payload.model, 'claude-sonnet-5-5');
+  assert.equal(photo.payload.messages[0].content[0].source.data, '/9j/4A==');
+  assert.match(photo.payload.messages[0].content[1].text, /magnum/);
+  assert.equal(c.gas._fetches.filter(f => f.method === 'getFile').length, 0, 'no Telegram download');
+
+  // Bad input is refused before Claude is called.
+  c.gas._fetches.length = 0;
+  const bad = identify => c.owner('identify', { identify }).error;
+  assert.match(bad({}), /Type the wine or add a photo/);
+  assert.match(bad({ photo: { media_type: 'image/svg+xml', data: 'PHN2Zz4=' } }), /couldn't be used/);
+  assert.match(bad({ photo: { media_type: 'image/jpeg', data: 'not base64!' } }), /couldn't be used/);
+  assert.match(bad({ photo: { media_type: 'image/jpeg', data: 'A'.repeat(2000004) } }), /couldn't be used/);
+  assert.equal(anthropic().length, 0);
+
+  // A wine it can't place is an error, not an empty form.
+  c.answers.label = { readable: false, producer: '', wine: '', cuvee: '', vintage: '', colour: '', grape: '' };
+  assert.match(bad({ text: 'zzqx' }), /couldn't tell which wine that is/);
+});
+
+test('AI look-ups stop at the daily limit from the Settings tab, for the bot and the website together', () => {
+  const c = labelBot();
+  c.tab('Settings').rows.push(['aiDailyLimit', '2', '']);
+  c.ok('identify', { identify: { text: 'one' } });
+  c.draft(c.say('/add two'));
+  assert.match(c.owner('identify', { identify: { text: 'three' } }).error, /2 AI look-ups allowed today/);
+  assert.match(c.sent(c.say('/add four')), /2 AI look-ups allowed today/);
+});
+
 test('label photos: guests are refused, keys are needed, and an unreadable photo can be retried or cancelled', () => {
   const c = labelBot({ keys: false });
   assert.match(c.sent(c.photo()), /Run setLabelReader\(\)/);
@@ -784,7 +942,7 @@ test('migrate creates the Lists, Settings and Reminders log tabs, and never over
   const { backend, tab, ok } = freshCellar();
   assert.deepEqual(tab('Lists').rows[0], ['colour', 'colourTone', 'grape', 'storage']);
   assert.deepEqual(tab('Lists').rows[1].slice(0, 3), ['Sparkling', 'white', 'Pinot Noir']);
-  assert.deepEqual(tab('Settings').rows.slice(1).map(r => r[0]), ['currency', 'reminderHour', 'closeReminderMonths', 'nudgeDay']);
+  assert.deepEqual(tab('Settings').rows.slice(1).map(r => r[0]), ['currency', 'reminderHour', 'closeReminderMonths', 'nudgeDay', 'aiDailyLimit']);
   assert.equal(tab('Reminders log').hidden, true, 'the log tab is hidden');
 
   tab('Lists').rows.push(['Orange', 'white', '', '']);
@@ -824,7 +982,7 @@ test('Settings drive the currency and reminder timing; bad values fall back and 
   setSetting(tab, 'nudgeDay', 'tuesday');
   setSetting(tab, 'reminderHour', '25');
   const s = ok('list').settings;
-  assert.deepEqual(s, { currency: '€', reminderHour: 9, closeReminderMonths: 3, nudgeDay: 'Tuesday' });
+  assert.deepEqual(s, { currency: '€', reminderHour: 9, closeReminderMonths: 3, nudgeDay: 'Tuesday', aiDailyLimit: 100 });
   assert.match(sent(say('/stats')), /€809/);
 
   const keys = (recs, today) => backend.remindersDue_(recs, today, {}, s).map(r => r.key);

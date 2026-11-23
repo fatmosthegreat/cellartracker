@@ -224,6 +224,30 @@ details[open] summary { margin-bottom: 12px; }
 .form-error { color: var(--late); font-size: .88rem; margin: 0; }
 .form-error:empty { display: none; }
 
+/* ✨ Fill in with AI, at the top of the Add dialog */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.ed-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ai-toggle, .ai-cam {
+  display: inline-grid; place-items: center; flex: none; width: 40px; height: 40px; cursor: pointer;
+  border: 1px solid var(--rule); border-radius: 50%; background: var(--paper); color: var(--claret);
+}
+.ai-toggle svg { width: 22px; height: 22px; fill: currentColor; }
+.ai-toggle[aria-expanded="true"] { background: var(--claret); border-color: var(--claret); color: var(--on-claret); }
+.ai-cam { border-radius: 8px; color: var(--ink); }
+.ai-cam svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; }
+.ai-cam.has-photo { background: var(--claret); border-color: var(--claret); color: var(--on-claret); }
+.ai-toggle:focus-visible, .ai-cam:focus-within { outline: 2px solid var(--claret); outline-offset: 2px; }
+.ai-panel { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--rule); border-radius: 12px; background: var(--paper); }
+.ai-row { display: flex; gap: 8px; align-items: center; }
+.ai-row input[type="text"] {
+  flex: 1; min-width: 0; font: inherit; font-size: 16px; padding: 9px 11px;
+  border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); color: var(--ink);
+}
+.ai-status { margin: 0; font-size: .85rem; color: var(--muted); }
+.ai-status:empty { display: none; }
+.ai-status.error { color: var(--late); }
+.ai-status .linkbtn { margin-left: 4px; }
+
 /* Tasting card */
 #ts-body { display: grid; gap: 12px; }
 #ts-body .eyebrow { margin: 0; }

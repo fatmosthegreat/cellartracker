@@ -26,7 +26,7 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-23.10';
+const BUILD = '2026-11-23.13';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
@@ -86,6 +86,8 @@ const SETTINGS = {
       const day = WEEKDAYS.filter(function (d) { return d.toLowerCase() === String(v).toLowerCase(); })[0];
       return day || (String(v).toLowerCase() === 'none' ? 'none' : null);
     } },
+  aiDailyLimit: { value: 100, about: 'Most AI look-ups (bot and website together) in one day, so a leaked passkey or a stuck loop can\'t run up the bill',
+    check: function (v) { const n = Number(v); return Number.isInteger(n) && n >= 0 && n <= 1000 ? n : null; } },
 };
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -105,6 +107,7 @@ const ROUTES = {
   remove: { auth: true, write: true, run: function (req) { return removeWine_(req.id); } },
   adjust: { auth: true, write: true, run: function (req) { return adjustBottles_(req.id, req.delta); } },
   drink: { auth: true, write: true, run: function (req) { return drinkWine_(req.id, req.drink); } },
+  identify: { auth: true, run: function (req) { return identifyFromPage_(req.identify); } },
 };
 
 /* ============================== Setup (run from the editor) ============================== */
@@ -944,9 +947,9 @@ function remindersDue_(recs, today, sent, settings) {
 
 /* ---------- Commands ---------- */
 
-// `menu` commands show in Telegram's command list. `run(q, recs, guest)` gets the text after the
-// command, the cellar bottles the sender may see (guests never see hidden ones), and whether the
-// sender is a guest.
+// `menu` commands show in Telegram's command list. `run(q, recs, guest, chatId)` gets the text after
+// the command, the cellar bottles the sender may see (guests never see hidden ones), whether the
+// sender is a guest, and their chat. It returns the reply, or nothing if it sent its own.
 const TG_COMMANDS = {
   cellar: { menu: true, help: 'Everything in the cellar', run: function (q, recs) { return { text: cellarText_(recs) }; } },
   ready: { menu: true, help: 'In its drinking window now', run: function (q, recs) {
@@ -990,6 +993,10 @@ const TG_COMMANDS = {
   } },
   collected: { menu: true, owner: true, help: 'Mark a bottle as collected', run: function (q, recs) {
     return pickBottle_('coll', q, recs.filter(function (w) { return w.status === 'To collect'; }), 'Which one did you collect?');
+  } },
+  add: { menu: true, owner: true, help: 'Add a wine by name, e.g. /add rousseau gevrey 2019', run: function (q, recs, guest, chatId) {
+    if (!q) return { text: 'Type the wine after /add, e.g. /add rousseau gevrey 2019' };
+    startDraft_({ typed: q }, chatId, '🔍 Looking up the wine…');
   } },
   add1: { menu: true, owner: true, help: 'Add another bottle of a wine', run: function (q, recs) {
     return pickBottle_('add1', q, recs, 'Which wine did you buy another bottle of?');
@@ -1102,8 +1109,8 @@ function answerTelegram_(update, msg, chatId, guest, props) {
   try {
     if (!cmd) throw new Error('I don\'t know /' + name + '. Try /help.');
     if (guest && cmd.owner) throw new Error('Only the owner can change the cellar.');
-    const reply = cmd.run(arg, cellarRecs_(guest), guest);
-    telegramSendLong_(reply.text, reply.buttons, chatId);
+    const reply = cmd.run(arg, cellarRecs_(guest), guest, chatId);
+    if (reply) telegramSendLong_(reply.text, reply.buttons, chatId);  // /add sends its own messages
   } catch (err) {
     telegramSend_('⚠️ ' + escH_(botError_(err)), null, chatId);
   }
@@ -1176,8 +1183,9 @@ function sortCellar_(recs) {
 
 /* ---------- Label photos: add a bottle from a photo of its label ---------- */
 //
-// Send the bot a photo of a label. Claude Haiku reads producer, wine, cuvée, vintage, colour and
-// grape, and the bot shows a draft with ✅ Add, ✏️ Fix, 🔁 Retry with Sonnet and ❌ Cancel. Nothing
+// Send the bot a photo of a label, or type /add and the wine's name (spelling mistakes are fine).
+// Claude Haiku works out producer, wine, cuvée, vintage, colour and grape, asks for the drinking
+// window, and the bot shows a draft with ✅ Add, ✏️ Fix, 🔁 Retry with Sonnet and ❌ Cancel. Nothing
 // is added until you tap Add. Retry reads the label again with Sonnet, the stronger and costlier
 // model, for labels Haiku gets wrong. You give the drinking window yourself by replying to the
 // draft with it ("2028-2040"); that needs no Claude call. Any other reply ("vintage 2019") is a
@@ -1201,18 +1209,32 @@ function setLabelReader() {
 }
 
 function labelFromPhoto_(msg, chatId) {
+  startDraft_({ fileId: pickPhoto_(msg.photo).file_id, hint: trim_(msg.caption || '') }, chatId, '🔍 Reading the label…');
+}
+
+// A new draft from a photo (`fileId`) or typed text (`typed`): read it, show it, then ask for
+// the drinking window.
+function startDraft_(d, chatId, status) {
   if (!PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY')) {
-    telegramSend_('⚠️ I can\'t read labels yet. Run setLabelReader() in Apps Script first.', null, chatId);
+    telegramSend_('⚠️ I can\'t look up wines yet. Run setLabelReader() in Apps Script first.', null, chatId);
     return;
   }
-  const d = { id: newId_().slice(0, 8), fileId: pickPhoto_(msg.photo).file_id, hint: trim_(msg.caption || ''), chatId: chatId, window: '' };
-  d.msgId = messageId_(telegramSend_('🔍 Reading the label…', null, chatId));
+  Object.assign(d, { id: newId_().slice(0, 8), chatId: chatId, window: '' });
+  d.msgId = messageId_(telegramSend_(status, null, chatId));
   try {
     readDraft_(d, LABEL.reader);
   } catch (err) {
     d.problem = botError_(err);
   }
   showDraft_(d);
+  if (!d.problem) askDraft_(d, '🍷 What\'s the drinking window? e.g. <i>2028-2040</i>. Or tap ✅ Add on the draft to skip it.', 'e.g. 2028-2040');
+}
+
+// Asks a question about the draft with Telegram's reply box open; the reply goes to fixFromReply_.
+function askDraft_(d, text, placeholder) {
+  d.askId = messageId_(telegramApi_('sendMessage', { chat_id: d.chatId, parse_mode: 'HTML', text: text,
+    reply_markup: { force_reply: true, input_field_placeholder: placeholder } }));
+  saveDraft_(d);
 }
 
 // Telegram sends each photo in several sizes, smallest first. About 1600px is plenty for a label,
@@ -1222,13 +1244,47 @@ function pickPhoto_(sizes) {
   return fit.length ? fit[fit.length - 1] : sizes[0];
 }
 
-// Reads the photo (again) with `model`. A window you've already typed is kept. `d.problem` says
-// what went wrong, or is '' when the draft can be added. Throws if Telegram or Claude can't be reached.
+// Reads the draft's photo or typed text (again) with `model`. A window you've already typed is kept.
+// Throws if Telegram or Claude can't be reached.
 function readDraft_(d, model) {
   d.readBy = model;
-  const got = readLabel_(downloadPhoto_(d.fileId), d.hint, model);
-  DRAFT_FIELDS.forEach(function (k) { d[k] = trim_(got[k] || ''); });
-  d.problem = got.readable && d.producer ? '' : 'I couldn\'t read a wine label in that photo.';
+  Object.assign(d, identifyWine_(d.typed ? { typed: d.typed } : { photo: downloadPhoto_(d.fileId), hint: d.hint }, model));
+}
+
+// The one place a wine is identified, for the bot and the website alike. `src` is { typed } or
+// { photo: { media_type, data }, hint }. Returns the DRAFT_FIELDS plus `problem`: what went wrong,
+// or '' when the wine was identified.
+function identifyWine_(src, model) {
+  const content = src.typed ? [{ type: 'text', text: 'The owner typed: "' + src.typed + '"' }] : [
+    { type: 'image', source: { type: 'base64', media_type: src.photo.media_type, data: src.photo.data } },
+    { type: 'text', text: src.hint ? 'A note from the owner about this bottle: ' + src.hint : 'Read this label.' },
+  ];
+  const got = readWine_(content, model);
+  const out = {};
+  DRAFT_FIELDS.forEach(function (k) { out[k] = trim_(got[k] || ''); });
+  out.problem = got.readable && out.producer ? ''
+    : src.typed ? 'I couldn\'t tell which wine that is.' : 'I couldn\'t read a wine label in that photo.';
+  return out;
+}
+
+// The website's ✨ panel: `input` is { text, photo: { media_type, data }, strong }. The owner's
+// passkey was already checked (ROUTES.identify). Nothing from the browser is trusted, so the
+// photo's type, encoding and size and the text's length are checked here. Returns the fields to
+// fill in the Add form; nothing is saved.
+const PAGE_PHOTO = { types: ['image/jpeg', 'image/png', 'image/webp'], maxChars: 2000000 };  // ~1.5 MB
+function identifyFromPage_(input) {
+  const i = input || {};
+  const text = trim_(i.text || '').slice(0, 200);
+  const p = i.photo;
+  if (p && (PAGE_PHOTO.types.indexOf(p.media_type) < 0 || typeof p.data !== 'string' ||
+    p.data.length > PAGE_PHOTO.maxChars || !/^[A-Za-z0-9+/]+={0,2}$/.test(p.data))) {
+    throw new Error('That photo couldn\'t be used. Try a JPEG or PNG under about 1.5 MB.');
+  }
+  if (!p && !text) throw new Error('Type the wine or add a photo first.');
+  const got = identifyWine_(p ? { photo: { media_type: p.media_type, data: p.data }, hint: text } : { typed: text },
+    i.strong ? LABEL.retry : LABEL.reader);
+  if (got.problem) throw new Error(got.problem + ' Try again, or fill it in yourself.');
+  return { producer: got.producer, wine: wineField_(got), vintage: got.vintage, colour: got.colour, grape: got.grape };
 }
 
 function downloadPhoto_(fileId) {
@@ -1239,19 +1295,19 @@ function downloadPhoto_(fileId) {
   return { media_type: /\.png$/i.test(file.file_path) ? 'image/png' : 'image/jpeg', data: Utilities.base64Encode(res.getContent()) };
 }
 
-function readLabel_(photo, hint, model) {
+// Works out the wine from a label photo, or from the owner's rough typing of its name.
+function readWine_(content, model) {
   return claude_({
     model: model,
-    system: 'You read wine labels for a cellar list. Copy names as printed, with their accents. producer: the ' +
-      'domaine, château or house. wine: the appellation or wine name with its classification, e.g. "Vosne-Romanée ' +
-      '1er Cru". cuvee: the vineyard or cuvée name if there is one, else "". vintage: the four-digit year, or "" if ' +
-      'non-vintage or not shown. colour: from the label or what you know of the wine, or "" if unsure. grape: the ' +
-      'main grape or grapes, spelt like this where they fit: ' + lookups_().lists.grapes.join(', ') + '. Leave a ' +
-      'field "" rather than guess. readable: false if the photo is not a wine label or can\'t be read.',
-    messages: [{ role: 'user', content: [
-      { type: 'image', source: { type: 'base64', media_type: photo.media_type, data: photo.data } },
-      { type: 'text', text: hint ? 'A note from the owner about this bottle: ' + hint : 'Read this label.' },
-    ] }],
+    system: 'You identify one wine for a cellar list, from a photo of its label or from a name the owner typed. ' +
+      'From a photo, copy names as printed, with their accents. Typed names may be misspelled or shortened: give ' +
+      'the real, correctly spelled names, e.g. "rouseau" is "Domaine Armand Rousseau". producer: the domaine, château or ' +
+      'house. wine: the appellation or wine name with its classification, e.g. "Vosne-Romanée 1er Cru". cuvee: ' +
+      'the vineyard or cuvée name if there is one, else "". vintage: the four-digit year, or "" if non-vintage or ' +
+      'not given. colour: from the label or what you know of the wine, or "" if unsure. grape: the main grape or ' +
+      'grapes, spelt like this where they fit: ' + lookups_().lists.grapes.join(', ') + '. Leave a field "" ' +
+      'rather than guess. readable: false if you can\'t tell which wine it is.',
+    messages: [{ role: 'user', content: content }],
     schema: labelSchema_(false),
   });
 }
@@ -1278,6 +1334,32 @@ function windowReply_(text) {
   return /^\D*\d{4}\D+\d{4}\D*$/.test(text) ? cleanWindow_(text) : '';
 }
 
+// The row ✏️ Fix sends: one "field: value" line per field, mapped to where the draft keeps it.
+const ROW_FIELDS = { producer: 'producer', wine: 'wine', cuvee: 'cuvee', vintage: 'vintage', colour: 'colour',
+  grape: 'grape', window: 'window', notes: 'hint' };
+
+function draftRow_(d) {
+  return Object.keys(ROW_FIELDS).map(function (k) { return k + ': ' + (d[ROW_FIELDS[k]] || ''); }).join('\n');
+}
+
+// A reply in that form, as { field: value }, or null if it isn't one. Fields left out stay as
+// they are, so "vintage: 2019" alone works too. A blank value clears the field.
+function rowReply_(text) {
+  const lines = String(text).split('\n').filter(function (l) { return trim_(l); });
+  const parsed = lines.map(function (l) { return /^\s*([^:]+?)\s*:\s*(.*)$/.exec(l); });
+  const field = function (m) { const k = m ? fold_(m[1]) : ''; return { color: 'colour', note: 'notes' }[k] || k; };
+  if (!parsed.some(function (m) { return ROW_FIELDS[field(m)]; })) return null;
+  const row = {};
+  parsed.forEach(function (m, i) {
+    const key = field(m);
+    if (!ROW_FIELDS[key]) throw new Error('"' + trim_(lines[i]) + '" isn\'t a field. Each line should be one of: ' + Object.keys(ROW_FIELDS).join(', ') + '.');
+    row[key] = trim_(m[2]);
+  });
+  if (row.window && !cleanWindow_(row.window)) throw new Error('The window should look like 2028-2040.');
+  if (row.vintage && !/^\d{4}$/.test(row.vintage)) throw new Error('The vintage should be a year like 2019, or blank for NV.');
+  return row;
+}
+
 // The sheet has no cuvée column, so it goes after the wine's name.
 function wineField_(d) {
   return d.wine && d.cuvee ? d.wine + ' · ' + d.cuvee : d.wine || d.cuvee;
@@ -1285,8 +1367,17 @@ function wineField_(d) {
 
 // One Claude request with `req.model`, whose answer must match `req.schema`. Returns the parsed answer.
 function claude_(req) {
-  const key = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
-  if (!key) throw new Error('I can\'t read labels yet. Run setLabelReader() in Apps Script first.');
+  const props = PropertiesService.getScriptProperties();
+  const key = props.getProperty('ANTHROPIC_API_KEY');
+  if (!key) throw new Error('I can\'t look up wines yet. Run setLabelReader() in Apps Script first.');
+  // A daily cap on calls from the bot and the website together (Settings: aiDailyLimit).
+  let used = {};
+  try { used = JSON.parse(props.getProperty('AI_USES') || '{}'); } catch (err) { used = {}; }
+  const today = today_();
+  const n = used.day === today ? used.n : 0;
+  const limit = lookups_().settings.aiDailyLimit;
+  if (n >= limit) throw new Error('That\'s the ' + limit + ' AI look-ups allowed today. It resets tomorrow (Settings: aiDailyLimit).');
+  props.setProperties({ AI_USES: JSON.stringify({ day: today, n: n + 1 }) });
   const body = {
     model: req.model, max_tokens: 4000, system: req.system, messages: req.messages,
     output_config: { effort: 'low', format: { type: 'json_schema', schema: req.schema } },
@@ -1376,7 +1467,8 @@ function draftView_(d) {
   const btn = function (act, text) { return { text: text, callback_data: 'lbl:' + act + ':' + d.id }; };
   const retry = btn('retry', d.readBy === LABEL.retry ? '🔁 Retry' : '🔁 Retry with Sonnet');
   if (d.problem) {
-    return { text: '⚠️ ' + escH_(d.problem) + '\nTry 🔁 Retry, or send a clearer photo.', buttons: [[retry, btn('no', '❌ Cancel')]] };
+    return { text: '⚠️ ' + escH_(d.problem) + '\nTry 🔁 Retry, or ' + (d.typed ? 'type it differently.' : 'send a clearer photo.'),
+      buttons: [[retry, btn('no', '❌ Cancel')]] };
   }
   const lines = ['🍷 <b>' + escH_(d.vintage || 'NV') + '</b> ' + escH_(d.producer) + ' · <i>' + escH_(wineField_(d)) + '</i>'];
   const kind = [d.colour, d.grape].filter(Boolean).join(' · ');
@@ -1408,10 +1500,8 @@ const DRAFT_ACTIONS = {
     edit('Cancelled. Nothing was added.');
   },
   fix: function (d) {
-    d.askId = messageId_(telegramApi_('sendMessage', { chat_id: d.chatId, parse_mode: 'HTML',
-      text: 'What should change? e.g. <i>2028-2040</i> for the drinking window, <i>vintage 2019</i> or <i>the cuvée is Les Suchots</i>',
-      reply_markup: { force_reply: true, input_field_placeholder: 'e.g. 2028-2040' } }));
-    saveDraft_(d);
+    askDraft_(d, 'Tap the row to copy it, change what\'s wrong, and send it back as a reply:\n\n<pre>' + escH_(draftRow_(d)) + '</pre>',
+      'Paste the row and edit it');
   },
   retry: function (d, edit) {
     edit('🔍 Reading the label again with Sonnet…');
@@ -1440,15 +1530,19 @@ function labelTap_(act, id, msg, chatId, guest) {
   }
 }
 
-// A reply to a draft. A drinking window ("2028-2040") is set straight away, with no Claude call.
-// Anything else ("vintage 2019") is a fix that Claude applies. The new draft goes to the bottom
-// of the chat.
+// A reply to a draft. The edited row from ✏️ Fix, or just a window ("2028-2040"), is applied
+// straight away, with no Claude call. Anything else ("vintage 2019") is a fix that Claude applies.
+// The new draft goes to the bottom of the chat.
 function fixFromReply_(d, text, chatId) {
   d.chatId = chatId;
   try {
     if (!text) throw new Error('Type what to change, e.g. 2028-2040 or vintage 2019.');
-    const win = windowReply_(text);
-    if (win) {
+    const row = rowReply_(text);
+    const win = row ? '' : windowReply_(text);
+    if (row) {
+      Object.keys(row).forEach(function (k) { d[ROW_FIELDS[k]] = k === 'window' ? cleanWindow_(row[k]) : row[k]; });
+      d.problem = '';
+    } else if (win) {
       d.window = win;
     } else {
       const cur = { readable: true, window: d.window || '' };

@@ -25,10 +25,11 @@ It's set out like a restaurant wine list: what's in the cellar, what's on its wa
 
 **For me, the owner**
 - **Editing:** add, edit and record opened bottles from the page, after logging in with a passkey.
+- **✨ Fill in with AI:** when adding a bottle, type a rough name (spelling mistakes are fine) or take or choose a photo of the label, and the form fills itself in with the producer, wine, vintage, colour and grape, ready to check and save.
 - **Hide from friends:** keep particular bottles out of the public list.
 - **Telegram bot:**
   - look up the cellar and record bottles from Telegram
-  - send a photo of a label to add that bottle: the bot reads the label and shows a draft to check, fix or retry, and I reply with the drinking window before adding it
+  - send a photo of a label, or type a wine's name with /add (spelling mistakes are fine), to add that bottle: the bot works out the producer, wine, vintage, colour and grape, asks for the drinking window, and shows a draft to check, fix or retry before anything is added
   - reminders when a wine's drinking window opens
   - a reminder six months before a window closes
   - a reminder when bottles are due to be collected

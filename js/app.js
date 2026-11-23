@@ -184,9 +184,101 @@ function openEditor(found) {
   del.removeAttribute("data-armed");
   del.textContent = "Delete";
   $("#ed-more").open = !!found;
+  resetAi();
+  $("#ai-toggle").hidden = !!found || isDemo;  // demo mode has no AI key behind it
   $("#editor").showModal();
   if (!found) $("#f-producer").focus();
 }
+
+/* ---------- ✨ Fill in with AI (when adding) ---------- */
+// The text and photo go to the backend's `identify` action, the same code the Telegram bot uses,
+// with your passkey like any other change. Nothing is saved: the answer fills in the form, and
+// you check it and press Save as usual.
+
+let aiPhoto = null;  // { media_type, data } once shrunk, or null
+
+function resetAi() {
+  aiPhoto = null;
+  $("#ai-panel").hidden = true;
+  $("#ai-toggle").setAttribute("aria-expanded", "false");
+  $("#ai-text").value = "";
+  $("#ai-photo").value = "";
+  $(".ai-cam").classList.remove("has-photo");
+  aiStatus("");
+}
+
+// Status under the panel. Set with textContent only, so nothing in a reply can become HTML.
+function aiStatus(text, isError = false, offerStronger = false) {
+  const s = $("#ai-status");
+  s.textContent = text;
+  s.classList.toggle("error", isError);
+  if (offerStronger) {
+    const b = Object.assign(document.createElement("button"), { type: "button", className: "linkbtn", textContent: "Not right? Try the stronger model" });
+    b.dataset.strong = "";
+    s.append(" ", b);
+  }
+}
+
+// Redraws the photo as a JPEG of at most 1600px before it leaves the device: smaller to send,
+// cheaper to read, and redrawing drops its metadata, such as where it was taken.
+async function shrinkPhoto(file, max = 1600) {
+  if (!file.type.startsWith("image/")) throw new Error("not an image");
+  const img = await createImageBitmap(file);
+  const scale = Math.min(1, max / Math.max(img.width, img.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+  img.close();
+  return { media_type: "image/jpeg", data: canvas.toDataURL("image/jpeg", 0.85).split(",")[1] };
+}
+
+async function fillWithAi(strong) {
+  const text = $("#ai-text").value.trim();
+  if (!text && !aiPhoto) return aiStatus("Type the wine or add a photo first.", true);
+  const go = $("#ai-go");
+  go.disabled = true;
+  aiStatus(strong ? "Asking the stronger model…" : "Looking it up…");
+  try {
+    const w = (await run("identify", { identify: { text, photo: aiPhoto, strong } })).result;
+    const form = $("#ed-form");
+    fillColours(w.colour);
+    for (const k of ["producer", "wine", "vintage", "colour", "grape"]) form.elements[k].value = w[k] || "";
+    $("#ed-more").open = true;
+    aiStatus("Filled in. Check it, add the drinking window, then Save.", false, !strong);
+    $("#f-window").focus();
+  } catch (err) {
+    aiStatus(err.message, true);
+  } finally {
+    go.disabled = false;
+  }
+}
+
+$("#ai-toggle").addEventListener("click", () => {
+  const opening = $("#ai-panel").hidden;
+  $("#ai-panel").hidden = !opening;
+  $("#ai-toggle").setAttribute("aria-expanded", String(opening));
+  if (opening) $("#ai-text").focus();
+});
+
+$("#ai-photo").addEventListener("change", async e => {
+  const file = e.target.files[0];
+  aiPhoto = null;
+  $(".ai-cam").classList.remove("has-photo");
+  if (!file) return;
+  try {
+    aiPhoto = await shrinkPhoto(file);
+    $(".ai-cam").classList.add("has-photo");
+    aiStatus("Photo ready. Add a note if you like, then tap Fill in.");
+  } catch {
+    aiStatus("That photo couldn't be opened. Try another.", true);
+  }
+});
+
+// Enter in the AI box looks the wine up; it must not submit (save) the form.
+$("#ai-text").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); fillWithAi(false); } });
+$("#ai-go").addEventListener("click", () => fillWithAi(false));
+$("#ai-status").addEventListener("click", e => { if (e.target.closest("[data-strong]")) fillWithAi(true); });
 
 $("#ed-form").addEventListener("submit", e => {
   e.preventDefault();

@@ -20,8 +20,8 @@ const DEVICE = (() => {
 /**
  * Calls a backend action. Throws an Error with a readable message on failure;
  * `error.auth` is true when the passkey was missing or wrong.
- * @param {"list"|"login"|"create"|"update"|"remove"|"adjust"|"drink"} action
- * @param {object} [payload]  e.g. { id, wine } or { id, drink }
+ * @param {"list"|"login"|"create"|"update"|"remove"|"adjust"|"drink"|"identify"} action
+ * @param {object} [payload]  e.g. { id, wine }, { id, drink } or { identify: { text, photo, strong } }
  * @param {string|null} [key] the passkey, if logged in
  */
 export async function call(action, payload = {}, key = null) {
