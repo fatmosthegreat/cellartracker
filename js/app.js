@@ -393,8 +393,14 @@ $("#lg-form").addEventListener("submit", e => {
 /* ---------- Events ---------- */
 
 document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", () => b.closest("dialog").close()));
-// The tasting card closes on a tap outside it: the dialog itself is only the target on its backdrop.
-$("#tasting").addEventListener("click", e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+// Every card closes on a tap outside it: the dialog element itself is only the target on its
+// backdrop. The press must start there too, so dragging to select text in a field and letting
+// go outside the card doesn't close it.
+document.querySelectorAll("dialog").forEach(d => {
+  let fromBackdrop = false;
+  d.addEventListener("pointerdown", e => { fromBackdrop = e.target === d; });
+  d.addEventListener("click", e => { if (fromBackdrop && e.target === d) d.close(); fromBackdrop = false; });
+});
 document.querySelectorAll(".chip").forEach(b => b.addEventListener("click", () => { state.filter = b.dataset.filter; render(); }));
 $("#search").addEventListener("input", e => { state.q = e.target.value; render(); });
 $("#add").addEventListener("click", () => openEditor(null));
@@ -422,7 +428,7 @@ $("#list").addEventListener("click", async e => {
       const res = await run("adjust", { id: wine.id, delta: 1 });
       toast(`${res.result.bottles} bottles of ${wine.producer} ${wine.wine}`);
     }
-    if (act === "collected") {
+    if (act === "arrived") {
       await run("update", { id: wine.id, wine: { status: "In cellar", storage: null } });
       toast("Moved into the cellar");
     }

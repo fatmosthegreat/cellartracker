@@ -27,7 +27,7 @@ export function toneOf(colour, lists = FALLBACK_LISTS) {
 
 export const SECTIONS = [
   { status: "In cellar", title: "In the cellar", source: "cellar" },
-  { status: "To collect", title: "To collect", source: "cellar" },
+  { status: "On order", title: "On order", source: "cellar" },
   { status: "Consumed", title: "Consumed", source: "consumed" },
 ];
 
@@ -41,11 +41,11 @@ export function statsHTML(state) {
   const { cellar, consumed } = state;
   const sum = list => list.reduce((n, w) => n + bottleCount(w), 0);
   const inCellar = sum(cellar.filter(w => w.status === "In cellar"));
-  const toCollect = sum(cellar.filter(w => w.status === "To collect"));
+  const onOrder = sum(cellar.filter(w => w.status === "On order"));
   const value = cellar.reduce((n, w) => n + (w.price || 0) * bottleCount(w), 0);
   return [
     `<span><b>${inCellar}</b> in the cellar</span>`,
-    toCollect ? `<span><b>${toCollect}</b> to collect</span>` : "",
+    onOrder ? `<span><b>${onOrder}</b> on order</span>` : "",
     `<span><b>${consumed.length}</b> consumed</span>`,
     `<span><b>${esc(currencyOf(state))}${money(value)}</b> on the shelf</span>`,
   ].join("");
@@ -186,7 +186,11 @@ function entryHTML(w, source, owner, lists) {
     const ws = windowState(w.window);
     if (ws) meta.push(`<span class="pill ${ws.key}">${ws.label}</span>`);
     if (w.storage) meta.push(`<span>${esc(w.storage)}</span>`);
-    if (w.status === "To collect" && w.collectBy) meta.push(`<span>Collect by ${esc(formatDate(w.collectBy))}</span>`);
+    if (w.status === "On order") {
+      const due = { Collect: "Collect by", Delivery: "Delivery by" }[w.arrival] || "Due";
+      if (w.collectBy) meta.push(`<span>${due} ${esc(formatDate(w.collectBy))}</span>`);
+      else if (w.arrival) meta.push(`<span>${esc(w.arrival)}</span>`);
+    }
   }
   if (owner && w.hidden) meta.push(`<span class="pill hidden">Hidden</span>`);
 
@@ -195,7 +199,7 @@ function entryHTML(w, source, owner, lists) {
   const actions = !owner ? "" : `<div class="actions">
       <button class="btn" type="button" data-act="edit" data-id="${id}">Edit</button>
       ${source === "cellar" ? `<button class="btn" type="button" data-act="more" data-id="${id}">+1 bottle</button>` : ""}
-      ${source === "cellar" && w.status === "To collect" ? `<button class="btn" type="button" data-act="collected" data-id="${id}">Collected</button>` : ""}
+      ${source === "cellar" && w.status === "On order" ? `<button class="btn" type="button" data-act="arrived" data-id="${id}">${{ Collect: "Collected", Delivery: "Delivered" }[w.arrival] || "Arrived"}</button>` : ""}
       ${source === "cellar" ? `<button class="btn" type="button" data-act="drink" data-id="${id}">Opened one</button>` : ""}
     </div>`;
 

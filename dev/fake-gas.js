@@ -195,7 +195,7 @@ const SAMPLE_BOTTLES = {
     { producer: 'Coudray-Bizot', wine: 'Vosne-Romanée 1er Cru La Croix Rameau', vintage: 2020, colour: 'Red',
       grape: 'Pinot Noir', window: '2027–2040', bottles: 1, status: 'In cellar', price: 313 },
     { producer: 'A F Gros', wine: 'Moulin-à-Vent', vintage: 2023, colour: 'Red', grape: 'Gamay',
-      window: '2025–2029', bottles: 1, status: 'To collect', storage: 'Grand Cru, collect Fri 27 Nov', price: 54 },
+      window: '2025–2029', bottles: 1, status: 'On order', arrival: 'Collect', storage: 'Grand Cru, collect Fri 27 Nov', price: 54 },
   ],
   consumed: [
     { producer: 'Penfolds', wine: 'Bin 128', vintage: 2024, colour: 'Red', grape: 'Shiraz', price: 88 },

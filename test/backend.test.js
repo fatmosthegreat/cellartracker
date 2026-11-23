@@ -121,7 +121,7 @@ test('same wine but a different vintage, price or status gets its own row', () =
   const { ok, byName } = freshCellar();
   ok('create', { wine: { producer: 'Jadot', wine: 'Gevrey-Chambertin', vintage: 2019 } });
   ok('create', { wine: { producer: 'Jadot', wine: 'Gevrey-Chambertin', vintage: 2018, price: 175 } });
-  const res = ok('create', { wine: { producer: 'Jadot', wine: 'Gevrey-Chambertin', vintage: 2018, status: 'To collect' } });
+  const res = ok('create', { wine: { producer: 'Jadot', wine: 'Gevrey-Chambertin', vintage: 2018, status: 'On order' } });
   assert.equal(byName(res.cellar, 'Jadot').length, 4);
 });
 
@@ -348,7 +348,7 @@ test('guests: let in by addTelegramGuest, look-ups only, hidden bottles stay hid
   assert.match(sent(say('/stats')), /S\$809/);
 
   // No changes, no buttons.
-  for (const cmd of ['/opened', '/collected', '/add1']) {
+  for (const cmd of ['/opened', '/arrived', '/add1']) {
     assert.match(sent(say(cmd, GUEST)), /Only the owner/);
   }
   const help = sent(say('/help', GUEST));
@@ -387,7 +387,7 @@ test('/cellar lists every bottle by status, and plain text searches ignoring acc
   const { say, sent, ok } = freshBot();
   const text = sent(say('/cellar'));
   assert.match(text, /In the cellar<\/b> · 4 bottles/);
-  assert.match(text, /To collect<\/b> · 1 bottle/);
+  assert.match(text, /On order<\/b> · 1 bottle/);
   for (const w of ok('list').cellar) assert.ok(text.includes(w.producer), w.producer);
 
   const found = sent(say('romanee duroche'));
@@ -398,10 +398,10 @@ test('/cellar lists every bottle by status, and plain text searches ignoring acc
   assert.match(sent(say('/explode')), /I don't know \/explode/);
 });
 
-test('/stats, /collect and /help answer', () => {
+test('/stats, /onorder and /help answer', () => {
   const { say, sent } = freshBot();
-  assert.match(sent(say('/stats')), /<b>4<\/b> in the cellar\n<b>1<\/b> to collect\n<b>1<\/b> consumed\n<b>S\$809<\/b> on the shelf/);
-  assert.match(sent(say('/collect')), /A F Gros[\s\S]*Grand Cru, collect Fri 27 Nov/);
+  assert.match(sent(say('/stats')), /<b>4<\/b> in the cellar\n<b>1<\/b> on order\n<b>1<\/b> consumed\n<b>S\$809<\/b> on the shelf/);
+  assert.match(sent(say('/onorder')), /A F Gros[\s\S]*Grand Cru, collect Fri 27 Nov/);
   assert.match(sent(say('/help')), /\/opened/);
 });
 
@@ -438,10 +438,10 @@ test('a failed tap acknowledgement still replaces the buttons, so a bottle is ne
   assert.match(sent(tap(btn.callback_data)), /Opened .*Jadot/);
 });
 
-test('/collected and /add1 change status and count', () => {
+test('/arrived and /add1 change status and count', () => {
   const { say, tap, buttons, ok, byName } = freshBot();
-  const coll = buttons(say('/collected'));
-  assert.equal(coll.length, 1, 'only bottles still to collect');
+  const coll = buttons(say('/arrived'));
+  assert.equal(coll.length, 1, 'only bottles on order');
   tap(coll[0].callback_data);
   assert.equal(byName(ok('list').cellar, 'A F Gros')[0].status, 'In cellar');
   tap(buttons(say('/add1 jadot'))[0].callback_data);
@@ -897,7 +897,7 @@ test('window reminders: opens in its first year, closing from 1 July of its last
 });
 
 test('collect reminders: day before, on the day, and a Monday nudge when undated or overdue', () => {
-  const tc = over => W({ window: '', status: 'To collect', ...over });
+  const tc = over => W({ window: '', status: 'On order', ...over });
   assert.deepEqual(due([tc({ collectBy: '2026-11-27' })], '2026-11-26'), ['w1|collect|2026-11-27|before']);
   assert.deepEqual(due([tc({ collectBy: '2026-11-27' })], '2026-11-27'), ['w1|collect|2026-11-27|day']);
   assert.deepEqual(due([tc({ collectBy: '2026-11-27' })], '2026-11-25'), []);
@@ -922,10 +922,39 @@ test('sendReminders sends one message, then nothing more that day', () => {
   assert.equal(gas._fetches.length, 0);
 });
 
+test('on order by delivery: the bot and reminders say so, and arrival only takes Collect or Delivery', () => {
+  const { backend, gas, ok, owner } = freshBot();
+  const gros = ok('list').cellar.find(w => w.producer === 'A F Gros');
+  assert.equal(gros.arrival, 'Collect');
+  assert.match(owner('update', { id: gros.id, wine: { arrival: 'Post' } }).error, /Collect or delivery must be one of: Collect, Delivery/);
+  ok('update', { id: gros.id, wine: { arrival: 'Delivery', collectBy: '2026-11-27' } });
+  gas._fetches.length = 0;
+  backend.sendReminders_('2026-11-26');
+  assert.match(gas._fetches.find(f => f.method === 'sendMessage').payload.text, /Arrives tomorrow[\s\S]*A F Gros/);
+  ok('update', { id: gros.id, wine: { arrival: '' } });
+  gas._fetches.length = 0;
+  backend.sendReminders_('2026-11-27');
+  assert.match(gas._fetches.find(f => f.method === 'sendMessage').payload.text, /Due today/);
+});
+
+test('migrate() turns old "To collect" bottles into On order, by collection', () => {
+  const { ok, tab, backend } = freshCellar();
+  const cellar = tab('Cellar');
+  const head = cellar.getRange(1, 1, 1, cellar.getLastColumn()).getDisplayValues()[0];
+  const rows = cellar.getRange(2, 1, cellar.getLastRow() - 1, head.length).getDisplayValues();
+  const r = rows.findIndex(x => x[head.indexOf('status')] === 'On order') + 2;
+  cellar.getRange(r, head.indexOf('status') + 1).setValues([['To collect']]);
+  cellar.getRange(r, head.indexOf('arrival') + 1).setValues([['']]);
+  backend.migrate();
+  const gros = ok('list').cellar.find(w => w.producer === 'A F Gros');
+  assert.equal(gros.status, 'On order');
+  assert.equal(gros.arrival, 'Collect');
+});
+
 test('Collect by is a date, and is not carried into Drunk', () => {
   const { ok, owner, tab } = freshCellar();
   const w = ok('list').cellar.find(x => x.producer === 'A F Gros');
-  assert.match(owner('update', { id: w.id, wine: { collectBy: 'Friday' } }).error, /Collect by must be a date/);
+  assert.match(owner('update', { id: w.id, wine: { collectBy: 'Friday' } }).error, /Due by must be a date/);
   ok('update', { id: w.id, wine: { collectBy: '2026-11-27' } });
   assert.equal(ok('list').cellar.find(x => x.id === w.id).collectBy, '2026-11-27');
   const res = ok('drink', { id: w.id });
@@ -988,7 +1017,7 @@ test('Settings drive the currency and reminder timing; bad values fall back and 
   const keys = (recs, today) => backend.remindersDue_(recs, today, {}, s).map(r => r.key);
   assert.deepEqual(keys([W()], '2033-09-30'), []);
   assert.deepEqual(keys([W()], '2033-10-01'), ['w1|close|2033'], '3 months before the end of 2033');
-  const tc = W({ window: '', status: 'To collect' });
+  const tc = W({ window: '', status: 'On order' });
   assert.deepEqual(keys([tc], '2026-11-23'), [], 'not Monday any more');
   assert.deepEqual(keys([tc], '2026-11-24'), ['w1|nudge|2026-11-24'], 'Tuesday');
   assert.deepEqual(backend.remindersDue_([W()], '2033-12-01', {}, { ...s, closeReminderMonths: 0 }).length, 0, '0 turns it off');

@@ -35,7 +35,7 @@
     <div class="chips" role="group" aria-label="Show">
       <button class="chip" type="button" data-filter="All" aria-pressed="true">All</button>
       <button class="chip" type="button" data-filter="In cellar" aria-pressed="false">In the cellar</button>
-      <button class="chip" type="button" data-filter="To collect" aria-pressed="false">To collect</button>
+      <button class="chip" type="button" data-filter="On order" aria-pressed="false">On order</button>
       <button class="chip" type="button" data-filter="Consumed" aria-pressed="false">Consumed</button>
     </div>
     <input class="search" id="search" type="search" placeholder="Search producer, wine, grape" aria-label="Search the cellar">
@@ -93,7 +93,7 @@
           <div class="field"><label for="f-window">Drinking window</label>
             <input id="f-window" name="drinkWindow" data-field="window" autocomplete="off" placeholder="2028–2035"></div>
           <div class="field"><label for="f-status">Status</label>
-            <select id="f-status" name="status"><option>In cellar</option><option>To collect</option></select></div>
+            <select id="f-status" name="status"><option>In cellar</option><option>On order</option></select></div>
         </div>
         <div class="grid2">
           <div class="field" data-for="cellar"><label for="f-storage">Where it is</label>
@@ -101,7 +101,9 @@
           <div class="field"><label for="f-purchased">Bought on</label><input id="f-purchased" name="purchased" type="date"></div>
         </div>
         <div class="grid2" data-for="cellar">
-          <div class="field"><label for="f-collect">Collect by</label><input id="f-collect" name="collectBy" type="date"></div>
+          <div class="field"><label for="f-arrival">Collect or delivery</label>
+            <select id="f-arrival" name="arrival"><option value="">Not set</option><option>Collect</option><option>Delivery</option></select></div>
+          <div class="field"><label for="f-collect">Due by</label><input id="f-collect" name="collectBy" type="date"></div>
         </div>
         <div class="field"><label for="f-notes">Notes</label><textarea id="f-notes" name="notes"></textarea></div>
         <label class="check" for="f-hidden"><input id="f-hidden" name="hidden" type="checkbox">

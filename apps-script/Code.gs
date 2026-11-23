@@ -26,11 +26,11 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-23.14';
+const BUILD = '2026-11-23.16';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
-    'storage', 'price', 'purchased', 'notes', 'hidden', 'created', 'updated', 'collectBy'],
+    'storage', 'price', 'purchased', 'notes', 'hidden', 'created', 'updated', 'collectBy', 'arrival'],
   Consumed: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'price', 'purchased',
     'consumedOn', 'rating', 'notes', 'hidden', 'created', 'updated'],
 };
@@ -45,12 +45,21 @@ const FIELD_RULES = {
   rating: { type: 'number', min: 0, max: 10, label: 'Rating' },
   purchased: { type: 'date', label: 'Bought on' },
   consumedOn: { type: 'date', label: 'Consumed on' },
-  collectBy: { type: 'date', label: 'Collect by' },
-  status: { type: 'enum', values: ['In cellar', 'To collect'], label: 'Status' },
+  collectBy: { type: 'date', label: 'Due by' },
+  status: { type: 'enum', values: ['In cellar', 'On order'], label: 'Status' },
+  arrival: { type: 'enum', values: ['Collect', 'Delivery'], label: 'Collect or delivery' },
   hidden: { type: 'bool' },
 };
 
 const SYSTEM_FIELDS = ['id', 'created', 'updated'];
+
+// How a bottle on order arrives (the arrival field) sets the wording in the bot and reminders.
+const ARRIVAL = {
+  Collect: { due: 'Collect by', tomorrow: 'Collect tomorrow', today: 'Collect today', waiting: 'Still to collect', done: 'Collected' },
+  Delivery: { due: 'Delivery by', tomorrow: 'Arrives tomorrow', today: 'Arrives today', waiting: 'Still on order', done: 'Delivered' },
+  '': { due: 'Due', tomorrow: 'Due tomorrow', today: 'Due today', waiting: 'Still on order', done: 'Arrived' },
+};
+function arrival_(w) { return ARRIVAL[w.arrival] || ARRIVAL['']; }
 // Wrong passkeys lock one device after 8 tries; 40 from anywhere locks everyone, as a backstop.
 const AUTH = { maxFailedLogins: 8, maxFailedLoginsAll: 40, lockoutSeconds: 600 };
 
@@ -81,7 +90,7 @@ const SETTINGS = {
     check: function (v) { const n = Number(v); return Number.isInteger(n) && n >= 0 && n <= 23 ? n : null; } },
   closeReminderMonths: { value: 6, about: 'Months before a drinking window ends to remind you (0 = never)',
     check: function (v) { const n = Number(v); return Number.isInteger(n) && n >= 0 && n <= 11 ? n : null; } },
-  nudgeDay: { value: 'Monday', about: 'Day of the weekly "still to collect" reminder (or none)',
+  nudgeDay: { value: 'Monday', about: 'Day of the weekly "still on order" reminder (or none)',
     check: function (v) {
       const day = WEEKDAYS.filter(function (d) { return d.toLowerCase() === String(v).toLowerCase(); })[0];
       return day || (String(v).toLowerCase() === 'none' ? 'none' : null);
@@ -173,6 +182,13 @@ function migrate() {
       sh.getRange(1, header.length + 1, 1, missing.length).setNumberFormat('@').setValues([missing]).setFontWeight('bold');
     }
     sh.setFrozenRows(1);
+  });
+  // "To collect" is now "On order"; those bottles were all being collected.
+  freshReads_();
+  const cellar = table_('Cellar');
+  readRows_(cellar).forEach(function (r) {
+    if (r.rec.status !== 'To collect') return;
+    writeRow_(cellar, r.row, encode_(cellar, Object.assign({}, r.rec, { status: 'On order', arrival: r.rec.arrival || 'Collect' }), r.cells));
   });
   const blank = ss.getSheetByName('Sheet1');
   if (blank && blank.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(blank);
@@ -853,9 +869,14 @@ function menuCommands_(guest) {
 
 // Run from the editor after a new command is added, so Telegram's / menu lists it.
 function updateBotMenu() {
-  telegramConfig_();
+  const cfg = telegramConfig_();
   setBotCommands_();
-  Logger.log('Menu updated. If Telegram still shows the old one, close and reopen the chat.');
+  // Read back what Telegram now has, so you can see whether the menu really changed.
+  const mine = telegramApi_('getMyCommands', { scope: { type: 'chat', chat_id: cfg.chatId } }).result;
+  const everyone = telegramApi_('getMyCommands', {}).result;
+  const names = function (list) { return list.map(function (c) { return '/' + c.command; }).join(' '); };
+  Logger.log('Build ' + BUILD + '\nYour menu: ' + names(mine) + '\nGuests\' menu: ' + names(everyone) +
+    '\nIf /add is listed above but not in Telegram, fully close and reopen the Telegram app.');
 }
 
 // Everyone sees the look-up commands in the menu; your chat also sees the ones that change things.
@@ -938,15 +959,16 @@ function remindersDue_(recs, today, sent, settings) {
     if (win && closeFrom && year === win.to && today >= win.to + closeFrom) {
       add(w.id + '|close|' + win.to, '⏳ <b>Drink by December</b>, its window closes this year\n' + bottleLine_(w));
     }
-    if (w.status !== 'To collect') return;
+    if (w.status !== 'On order') return;
+    const say = arrival_(w);
     const where = w.storage ? '\n' + escH_(w.storage) : '';
     if (w.collectBy === tomorrow) {
-      add(w.id + '|collect|' + w.collectBy + '|before', '📦 <b>Collect tomorrow</b>\n' + bottleLine_(w) + where);
+      add(w.id + '|collect|' + w.collectBy + '|before', '📦 <b>' + say.tomorrow + '</b>\n' + bottleLine_(w) + where);
     } else if (w.collectBy === today) {
-      add(w.id + '|collect|' + w.collectBy + '|day', '📦 <b>Collect today</b>\n' + bottleLine_(w) + where);
+      add(w.id + '|collect|' + w.collectBy + '|day', '📦 <b>' + say.today + '</b>\n' + bottleLine_(w) + where);
     } else if (nudgeToday && (!w.collectBy || w.collectBy < today)) {
       const late = w.collectBy ? ' (was due ' + niceDate_(w.collectBy) + ')' : '';
-      add(w.id + '|nudge|' + today, '📦 <b>Still to collect</b>' + late + '\n' + bottleLine_(w) + where);
+      add(w.id + '|nudge|' + today, '📦 <b>' + say.waiting + '</b>' + late + '\n' + bottleLine_(w) + where);
     }
   });
   return out;
@@ -970,11 +992,12 @@ const TG_COMMANDS = {
       .sort(function (a, b) { return parseWindow_(a.window).to - parseWindow_(b.window).to; });
     return { text: listText_('Drink soon', soon, 'No windows end this year or next.', true) };
   } },
-  collect: { menu: true, help: 'Bottles to collect', run: function (q, recs) {
-    const due = recs.filter(function (w) { return w.status === 'To collect'; });
-    if (!due.length) return { text: 'Nothing to collect.' };
-    return { text: '<b>To collect</b>\n\n' + due.map(function (w) {
-      return bottleLine_(w) + (w.collectBy ? '\nCollect by ' + niceDate_(w.collectBy) : '') +
+  onorder: { menu: true, help: 'Bottles on order', run: function (q, recs) {
+    const due = recs.filter(function (w) { return w.status === 'On order'; });
+    if (!due.length) return { text: 'Nothing on order.' };
+    return { text: '<b>On order</b>\n\n' + due.map(function (w) {
+      const say = arrival_(w);
+      return bottleLine_(w) + (w.collectBy ? '\n' + say.due + ' ' + niceDate_(w.collectBy) : w.arrival ? '\n' + w.arrival : '') +
         (w.storage ? '\n' + escH_(w.storage) : '');
     }).join('\n\n') };
   } },
@@ -989,7 +1012,7 @@ const TG_COMMANDS = {
     const value = recs.reduce(function (n, w) { return n + (w.price || 0) * (w.bottles || 1); }, 0);
     return { text: [
       '<b>' + sum('In cellar') + '</b> in the cellar',
-      '<b>' + sum('To collect') + '</b> to collect',
+      '<b>' + sum('On order') + '</b> on order',
       '<b>' + readRows_(table_('Consumed')).filter(function (r) { return !guest || !r.rec.hidden; }).length + '</b> consumed',
       '<b>' + escH_(lookups_().settings.currency) + money_(value) + '</b> on the shelf',
     ].join('\n') };
@@ -998,8 +1021,8 @@ const TG_COMMANDS = {
   opened: { menu: true, owner: true, help: 'Record a bottle you opened', run: function (q, recs) {
     return pickBottle_('drink', q, recs, 'Which one did you open?');
   } },
-  collected: { menu: true, owner: true, help: 'Mark a bottle as collected', run: function (q, recs) {
-    return pickBottle_('coll', q, recs.filter(function (w) { return w.status === 'To collect'; }), 'Which one did you collect?');
+  arrived: { menu: true, owner: true, help: 'Move a bottle on order into the cellar', run: function (q, recs) {
+    return pickBottle_('coll', q, recs.filter(function (w) { return w.status === 'On order'; }), 'Which one has arrived?');
   } },
   add: { menu: true, owner: true, help: 'Add a wine by name, e.g. /add rousseau gevrey 2019', run: function (q, recs, guest, chatId) {
     if (!q) return { text: 'Type the wine after /add, e.g. /add rousseau gevrey 2019' };
@@ -1024,9 +1047,9 @@ const TG_ACTIONS = {
     return '🍷 Opened ' + bottleLine_(w, true) + '\n' + (res.left ? res.left + ' left' : 'That was the last one') + '. Add a rating on the website.';
   },
   coll: function (w) {
-    if (w.status !== 'To collect') return bottleLine_(w, true) + ' is already in the cellar.';
+    if (w.status !== 'On order') return bottleLine_(w, true) + ' is already in the cellar.';
     withLock_(function () { return updateWine_(w.id, { status: 'In cellar' }); });
-    return '📦 Collected ' + bottleLine_(w, true) + '. It\'s now in the cellar.';
+    return '📦 ' + arrival_(w).done + ' ' + bottleLine_(w, true) + '. It\'s now in the cellar.';
   },
   add1: function (w) {
     const res = withLock_(function () { return adjustBottles_(w.id, 1); });
@@ -1129,7 +1152,7 @@ function pickBottle_(act, q, recs, question) {
   const matches = q ? searchRecs_(recs, q) : sortCellar_(recs);
   if (!matches.length) return { text: q ? 'Nothing matches “' + escH_(q) + '”.' : 'No bottles to choose from.' };
   if (matches.length > BOT.maxButtons) {
-    return { text: matches.length + ' bottles match. Add a word or two, e.g. /' + ({ drink: 'opened', coll: 'collected', add1: 'add1' })[act] + ' duroche 2018' };
+    return { text: matches.length + ' bottles match. Add a word or two, e.g. /' + ({ drink: 'opened', coll: 'arrived', add1: 'add1' })[act] + ' duroche 2018' };
   }
   return {
     text: question,
@@ -1142,11 +1165,11 @@ function pickBottle_(act, q, recs, question) {
 
 function cellarText_(recs) {
   if (!recs.length) return 'The cellar is empty.';
-  return ['In cellar', 'To collect'].map(function (status) {
+  return ['In cellar', 'On order'].map(function (status) {
     const list = recs.filter(function (w) { return w.status === status; });
     if (!list.length) return '';
     const n = list.reduce(function (a, w) { return a + (w.bottles || 1); }, 0);
-    return '<b>' + (status === 'In cellar' ? 'In the cellar' : 'To collect') + '</b> · ' + n + ' bottle' + (n === 1 ? '' : 's') + '\n' +
+    return '<b>' + (status === 'In cellar' ? 'In the cellar' : 'On order') + '</b> · ' + n + ' bottle' + (n === 1 ? '' : 's') + '\n' +
       list.map(function (w) { return bottleLine_(w); }).join('\n');
   }).filter(Boolean).join('\n\n');
 }

@@ -8,10 +8,10 @@ It's set out like a restaurant wine list: what's in the cellar, what's on its wa
 
 **Browsing the cellar**
 - **In the cellar:** every bottle, with its vintage, producer, grape, price paid and drinking window, grouped by colour.
-- **To collect:** bottles bought but not picked up yet, with the date they're due.
+- **On order:** bottles bought but not here yet, marked for collection or delivery, with the date they're due.
 - **When to open:** a timeline of each bottle's drinking window, with a line for today. Each bottle is marked *Drink now*, *Not ready* or *Past its window*.
 - **Search** by producer, wine or grape. Accents don't matter, so "romanee" finds "Romanée".
-- **Filters** for In the cellar, To collect and Consumed.
+- **Filters** for In the cellar, On order and Consumed.
 
 **Bottles already opened**
 - **Consumed:** every bottle opened, newest first.
@@ -32,7 +32,7 @@ It's set out like a restaurant wine list: what's in the cellar, what's on its wa
   - send a photo of a label, or type a wine's name with /add (spelling mistakes are fine), to add that bottle: the bot works out the producer, wine, vintage, colour and grape, asks for the drinking window, and shows a draft to check, fix or retry before anything is added
   - reminders when a wine's drinking window opens
   - a reminder six months before a window closes
-  - a reminder when bottles are due to be collected
+  - a reminder when bottles on order are due to be collected or delivered
   - guests I invite can look up the cellar too, without seeing hidden bottles or changing anything
 
 The list is read-only for visitors. The data lives in a Google Sheet.
