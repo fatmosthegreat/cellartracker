@@ -1,0 +1,10 @@
+# Cloudflare settings for the Telegram relay. Deploy from this folder with: npx wrangler deploy
+# The secret is not stored here; set it with: npx wrangler secret put RELAY_SECRET
+name = "cellar-relay"
+main = "worker.mjs"
+compatibility_date = "2025-11-01"
+workers_dev = true
+
+[vars]
+# Your Apps Script web app URL, the same one as apiUrl in js/config.js. Not secret.
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbycMQbR1ULvpJw683lY3QYqfbcNe-IUzOMtfrOfBNtDtmONT8o1UQKHAnmeUkRCdVbG/exec"

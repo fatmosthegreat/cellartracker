@@ -15,6 +15,7 @@ function createFakeGas() {
   class Sheet {
     constructor(name) { this.name = name; this.rows = []; }
     getName() { return this.name; }
+    setName(name) { this.name = name; return this; }
     getLastRow() {
       for (let r = this.rows.length; r > 0; r--) if (this.rows[r - 1].some(v => v !== '')) return r;
       return 0;
@@ -30,11 +31,14 @@ function createFakeGas() {
     getRange(row, col, numRows, numCols) { return new Range(this, row, col, numRows || 1, numCols || 1); }
     deleteRow(row) { this.rows.splice(row - 1, 1); }
     setFrozenRows() { return this; }
+    hideSheet() { this.hidden = true; return this; }
+    clearContents() { this.rows = []; return this; }
   }
 
   class Range {
     constructor(sheet, row, col, numRows, numCols) { Object.assign(this, { sheet, row, col, numRows, numCols }); }
     getDisplayValues() {
+      reads[this.sheet.name] = (reads[this.sheet.name] || 0) + 1;
       const out = [];
       for (let i = 0; i < this.numRows; i++) {
         const src = this.sheet.rows[this.row - 1 + i] || [];
@@ -72,6 +76,7 @@ function createFakeGas() {
   }
 
   const sheets = [];
+  const reads = {};  // for tests: how many times each tab was read
   const spreadsheet = {
     getSheetByName: name => sheets.find(s => s.name === name) || null,
     insertSheet: name => { const s = new Sheet(name); sheets.push(s); return s; },
@@ -88,6 +93,7 @@ function createFakeGas() {
   const fetches = [];
   const replies = {};
   const triggers = [];
+  const service = { url: 'https://script.google.com/macros/s/fake/exec' };  // the deployed web app
 
   return {
     SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet, flush() {} },
@@ -100,12 +106,15 @@ function createFakeGas() {
       computeDigest: (_alg, text) => sha256Bytes(text).map(b => (b > 127 ? b - 256 : b)),
       DigestAlgorithm: { SHA_256: 'SHA_256' },
       Charset: { UTF_8: 'UTF_8' },
-      formatDate: d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+      formatDate: (d, _tz, fmt) => (fmt === 'H' ? String(d.getHours()) : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`),
     },
     PropertiesService: {
       getScriptProperties: () => ({
         getProperty: k => (k in props ? props[k] : null),
-        setProperties: o => { Object.assign(props, o); },
+        setProperties: o => { Object.keys(o).forEach(k => { props[k] = String(o[k]); }); },
+        deleteProperty: k => { delete props[k]; },
+        getKeys: () => Object.keys(props),
+        getProperties: () => Object.assign({}, props),
       }),
     },
     CacheService: {
@@ -132,6 +141,7 @@ function createFakeGas() {
       },
     },
     ScriptApp: {
+      getService: () => ({ getUrl: () => service.url }),
       getProjectTriggers: () => triggers.slice(),
       deleteTrigger: t => { triggers.splice(triggers.indexOf(t), 1); },
       newTrigger: fn => {
@@ -140,6 +150,7 @@ function createFakeGas() {
           timeBased: () => b,
           everyDays: n => { t.schedule.everyDays = n; return b; },
           everyMinutes: n => { t.schedule.everyMinutes = n; return b; },
+          everyHours: n => { t.schedule.everyHours = n; return b; },
           atHour: h => { t.schedule.atHour = h; return b; },
           create: () => { triggers.push(t); return t; },
         };
@@ -150,15 +161,40 @@ function createFakeGas() {
     _fetches: fetches,          // for tests: Telegram calls made
     _replies: replies,          // for tests: fake Telegram responses
     _triggers: triggers,        // for tests: timers installed
+    _reads: reads,              // for tests: tab reads, to check requests don't re-read
+    _service: service,          // for tests: the deployed web app's URL
   };
 }
+
+// Sample bottles that demo mode and the tests start from: backend.setup(SAMPLE_BOTTLES).
+// Not used by the live app; your real bottles live in the Google Sheet.
+// "-" as a storage place is what older sheets used for "nowhere in particular"; it reads as blank.
+const SAMPLE_BOTTLES = {
+  cellar: [
+    { producer: 'Leflaive', wine: 'Bourgogne Blanc', vintage: 2022, colour: 'White', grape: 'Chardonnay',
+      window: '2024–2030', bottles: 1, status: 'In cellar', storage: '-', price: 150 },
+    { producer: 'Jadot', wine: 'Gevrey-Chambertin', vintage: 2018, colour: 'Red', grape: 'Pinot Noir',
+      window: '2023–2033', bottles: 1, status: 'In cellar', storage: '-', price: 140 },
+    { producer: 'Duroche', wine: 'Vosne-Romanée', vintage: 2018, colour: 'Red', grape: 'Pinot Noir',
+      window: '2024–2035', bottles: 1, status: 'In cellar', storage: '-', price: 152 },
+    { producer: 'Coudray-Bizot', wine: 'Vosne-Romanée 1er Cru La Croix Rameau', vintage: 2020, colour: 'Red',
+      grape: 'Pinot Noir', window: '2027–2040', bottles: 1, status: 'In cellar', storage: '-', price: 313 },
+    { producer: 'A F Gros', wine: 'Moulin-à-Vent', vintage: 2023, colour: 'Red', grape: 'Gamay',
+      window: '2025–2029', bottles: 1, status: 'To collect', storage: 'Grand Cru, collect Fri 27 Nov', price: 54 },
+  ],
+  consumed: [
+    { producer: 'Penfolds', wine: 'Bin 128', vintage: 2024, colour: 'Red', grape: 'Shiraz', price: 88 },
+  ],
+};
 
 // Runs Code.gs with the fake services as its globals and returns the functions the callers need.
 function loadBackend(gas, codeSource) {
   const names = Object.keys(gas).filter(k => !k.startsWith('_'));
   const factory = new Function(...names,
     codeSource + '\n;return { handle_, doGet, doPost, setup, migrate, sha256_, SCHEMA,' +
-    ' handleTelegram_, sendReminders_, remindersDue_, installTelegram, uninstallTelegram, findTelegramChatId, pollTelegram };');
+    ' handleTelegram_, sendReminders_, remindersDue_, installTelegram, uninstallTelegram, findTelegramChatId, pollTelegram,' +
+    ' relaySecret, installTelegramRelay_, sendReminders, status, lookups_, checkKey_, BUILD,' +
+    ' table_, readRows_, writeRow_, encode_, withLock_, adjustBottles_ };');
   return factory(...names.map(n => gas[n]));
 }
 
@@ -205,4 +241,4 @@ function sha256Bytes(text) {
   return out;
 }
 
-if (typeof module !== 'undefined') module.exports = { createFakeGas, loadBackend, sha256Bytes };
+if (typeof module !== 'undefined') module.exports = { createFakeGas, loadBackend, sha256Bytes, SAMPLE_BOTTLES };

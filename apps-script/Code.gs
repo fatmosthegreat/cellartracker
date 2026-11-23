@@ -3,16 +3,20 @@
  *
  * Data lives in two tabs of the spreadsheet this script is bound to:
  *   Cellar  bottles you own. One row per wine + vintage, with a bottle count and a status.
- *   Drunk   one row per bottle you've finished.
- * Drinking a bottle moves it from Cellar to Drunk. When the last bottle of a wine is drunk,
+ *   Consumed  one row per bottle you've opened.
+ * Opening a bottle moves it from Cellar to Consumed. When the last bottle of a wine is opened,
  * its Cellar row is deleted.
  *
  * Columns are matched by header name, so you can reorder them or add your own columns in the
  * sheet; the app leaves columns it doesn't know about alone.
  *
  * First run:  setPassword() → setup() → Deploy as web app.   (See README.md.)
- * Telegram:   setTelegram() → findTelegramChatId() → installTelegram().   (Optional; see README.md.)
+ * Telegram:   setTelegram() → findTelegramChatId() → installTelegram(), then for fast replies
+ *             relaySecret() → Cloudflare Worker → installTelegramRelay().   (Optional; see README.md.)
  * New field:  add it to SCHEMA (and FIELD_RULES if it isn't free text), then run migrate().
+ * Lists:      colours, grapes and storage places live in the "Lists" tab; currency and reminder
+ *             timing in the "Settings" tab. migrate() creates both. Edit them in the sheet.
+ * Check-up:   status() shows the stored settings, timers and whether the web app runs this build.
  * Tests:      `node --test` in the repo runs this file against an in-memory sheet.
  *
  * Written for the Apps Script V8 runtime. Avoids ?. and ?? to stay on safe syntax.
@@ -20,11 +24,15 @@
 
 const API_VERSION = 1;
 
+// Change this whenever you change this file. status() compares it with the deployed web app's,
+// so you can tell when the web app is still running an older version.
+const BUILD = '2026-11-23.3';
+
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
     'storage', 'price', 'purchased', 'notes', 'hidden', 'created', 'updated', 'collectBy'],
-  Drunk: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'price', 'purchased',
-    'drunkOn', 'rating', 'notes', 'hidden', 'created', 'updated'],
+  Consumed: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'price', 'purchased',
+    'consumedOn', 'rating', 'notes', 'hidden', 'created', 'updated'],
 };
 
 // How each field is checked. A field not listed here is free text (trimmed, max 1000 characters).
@@ -36,14 +44,57 @@ const FIELD_RULES = {
   price: { type: 'number', min: 0, max: 10000000, label: 'Price' },
   rating: { type: 'number', min: 0, max: 10, label: 'Rating' },
   purchased: { type: 'date', label: 'Bought on' },
-  drunkOn: { type: 'date', label: 'Drunk on' },
+  consumedOn: { type: 'date', label: 'Consumed on' },
   collectBy: { type: 'date', label: 'Collect by' },
   status: { type: 'enum', values: ['In cellar', 'To collect'], label: 'Status' },
   hidden: { type: 'bool' },
 };
 
 const SYSTEM_FIELDS = ['id', 'created', 'updated'];
-const AUTH = { maxFailedLogins: 8, lockoutSeconds: 600 };
+// Wrong passkeys lock one device after 8 tries; 40 from anywhere locks everyone, as a backstop.
+const AUTH = { maxFailedLogins: 8, maxFailedLoginsAll: 40, lockoutSeconds: 600 };
+
+/* ---------- Lookup tabs: lists and settings you edit in the sheet ---------- */
+//
+// "Lists": one column per list, read down from row 2. Colour order is the order on the page.
+//   colourTone (red, white or rose) picks the colour of the dot, timeline bar and year.
+// "Settings": setting / value rows. Blank or invalid values fall back to the defaults below.
+// migrate() creates both tabs, filled with these defaults, if they don't exist yet.
+
+const LOOKUP_TABS = { lists: 'Lists', settings: 'Settings', log: 'Reminders log' };
+
+const DEFAULT_LISTS = {
+  colours: [
+    { name: 'Sparkling', tone: 'white' }, { name: 'White', tone: 'white' }, { name: 'Rosé', tone: 'rose' },
+    { name: 'Red', tone: 'red' }, { name: 'Sweet', tone: 'white' }, { name: 'Fortified', tone: 'red' },
+  ],
+  grapes: ['Pinot Noir', 'Chardonnay', 'Gamay', 'Shiraz', 'Syrah', 'Grenache', 'Mourvèdre', 'Cabernet Sauvignon',
+    'Merlot', 'Cabernet Franc', 'Malbec', 'Nebbiolo', 'Sangiovese', 'Tempranillo', 'Riesling', 'Sauvignon Blanc',
+    'Chenin Blanc', 'Sémillon', 'Viognier', 'Pinot Meunier'],
+  storage: [],
+};
+
+const SETTINGS = {
+  currency: { value: 'S$', about: 'Shown before prices on the page and in Telegram',
+    check: function (v) { return v.length <= 6 ? v : null; } },
+  reminderHour: { value: 9, about: 'Hour (0–23) the Telegram reminders go out, in the project time zone',
+    check: function (v) { const n = Number(v); return Number.isInteger(n) && n >= 0 && n <= 23 ? n : null; } },
+  closeReminderMonths: { value: 6, about: 'Months before a drinking window ends to remind you (0 = never)',
+    check: function (v) { const n = Number(v); return Number.isInteger(n) && n >= 0 && n <= 11 ? n : null; } },
+  nudgeDay: { value: 'Monday', about: 'Day of the weekly "still to collect" reminder (or none)',
+    check: function (v) {
+      const day = WEEKDAYS.filter(function (d) { return d.toLowerCase() === String(v).toLowerCase(); })[0];
+      return day || (String(v).toLowerCase() === 'none' ? 'none' : null);
+    } },
+};
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// Fields whose values are matched to a list's spelling when saved ("pinot noir" → "Pinot Noir").
+const LIST_FIELDS = {
+  colour: function (l) { return l.colours.map(function (c) { return c.name; }); },
+  grape: function (l) { return l.grapes; },
+  storage: function (l) { return l.storage; },
+};
 
 // Every action the page can call. `auth` needs the passkey; `write` runs under a lock.
 const ROUTES = {
@@ -68,24 +119,49 @@ function setPassword() {
   Logger.log('Saved as a salted SHA-256 hash. Now change the line back to type-your-passkey-here and save.');
 }
 
-// Creates the tabs and adds your current bottles. Refuses to run twice.
-function setup() {
+// Creates the tabs (Cellar, Consumed, Lists, Settings) on a new sheet; they start empty, and you add
+// bottles from the page. Safe to run again. Demo mode and the tests pass `sample` bottles
+// (dev/fake-gas.js) to start from; those are only added to empty tabs.
+function setup(sample) {
   migrate();
+  if (!sample || !sample.cellar) {
+    Logger.log('Your tabs are ready. Add bottles from the page.');
+    return;
+  }
   const cellar = table_('Cellar');
-  const drunk = table_('Drunk');
-  if (readRows_(cellar).length || readRows_(drunk).length) {
-    throw new Error('Your tabs already have bottles, so setup() did nothing. migrate() is safe to run any time.');
+  const consumed = table_('Consumed');
+  if (readRows_(cellar).length || readRows_(consumed).length) {
+    throw new Error('Your tabs already have bottles, so no sample bottles were added.');
   }
   const now = timestamp_();
   const base = function () { return { id: newId_(), hidden: false, created: now, updated: now }; };
-  SEED.cellar.forEach(function (w) { appendRow_(cellar, encode_(cellar, Object.assign(base(), w))); });
-  SEED.drunk.forEach(function (w) { appendRow_(drunk, encode_(drunk, Object.assign(base(), w))); });
-  Logger.log('Added ' + SEED.cellar.length + ' cellar rows and ' + SEED.drunk.length + ' drunk rows.');
+  sample.cellar.forEach(function (w) { appendRow_(cellar, encode_(cellar, Object.assign(base(), w))); });
+  (sample.consumed || []).forEach(function (w) { appendRow_(consumed, encode_(consumed, Object.assign(base(), w))); });
 }
 
-// Adds any SCHEMA columns a tab is missing (at the end). Never deletes or moves anything.
+// Adds any SCHEMA columns a tab is missing (at the end), and creates the Lists, Settings and
+// Reminders log tabs if they don't exist. Never deletes, moves or overwrites anything.
 function migrate() {
+  freshReads_();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  renameOld_(ss);
+  if (!ss.getSheetByName(LOOKUP_TABS.lists)) {
+    const l = DEFAULT_LISTS;
+    const rows = Math.max(l.colours.length, l.grapes.length, 1);
+    const values = [['colour', 'colourTone', 'grape', 'storage']];
+    for (let i = 0; i < rows; i++) {
+      const c = l.colours[i];
+      values.push([c ? c.name : '', c ? c.tone : '', l.grapes[i] || '', l.storage[i] || '']);
+    }
+    writeTab_(ss.insertSheet(LOOKUP_TABS.lists), values);
+  }
+  if (!ss.getSheetByName(LOOKUP_TABS.settings)) {
+    writeTab_(ss.insertSheet(LOOKUP_TABS.settings), [['setting', 'value', 'about']].concat(Object.keys(SETTINGS)
+      .map(function (k) { return [k, String(SETTINGS[k].value), SETTINGS[k].about]; })));
+  }
+  if (!ss.getSheetByName(LOOKUP_TABS.log)) {
+    writeTab_(ss.insertSheet(LOOKUP_TABS.log), [['key', 'sentOn']]).hideSheet();
+  }
   Object.keys(SCHEMA).forEach(function (name) {
     const sh = ss.getSheetByName(name) || ss.insertSheet(name);
     const width = sh.getLastColumn();
@@ -98,6 +174,28 @@ function migrate() {
   });
   const blank = ss.getSheetByName('Sheet1');
   if (blank && blank.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(blank);
+  freshReads_();
+}
+
+// Older sheets called the Consumed tab "Drunk" and its date column "drunkOn". Renames them in
+// place, so every row stays as it is. Does nothing on a sheet that's already up to date.
+function renameOld_(ss) {
+  const old = ss.getSheetByName('Drunk');
+  if (old && !ss.getSheetByName('Consumed')) old.setName('Consumed');
+  const sh = ss.getSheetByName('Consumed');
+  if (!sh || sh.getLastColumn() < 1) return;
+  const header = sh.getRange(1, 1, 1, sh.getLastColumn()).getDisplayValues()[0].map(trim_);
+  const at = header.indexOf('drunkOn');
+  if (at >= 0 && header.indexOf('consumedOn') < 0) sh.getRange(1, at + 1).setValues([['consumedOn']]);
+}
+
+// Replaces a whole tab with `values` (first row is the header), as plain text.
+function writeTab_(sh, values) {
+  sh.clearContents();
+  sh.getRange(1, 1, values.length, values[0].length).setNumberFormat('@').setValues(values);
+  sh.getRange(1, 1, 1, values[0].length).setFontWeight('bold');
+  sh.setFrozenRows(1);
+  return sh;
 }
 
 /* ============================== Web app entry points ============================== */
@@ -108,39 +206,38 @@ function doGet() {
 }
 
 // The page POSTs plain-text JSON ({ action, key?, ... }) so the browser skips the CORS preflight.
-// Telegram POSTs updates to the same URL with ?tg=<secret> added (see installTelegram).
+// The Telegram relay (relay/worker.mjs) POSTs { telegram: update, relayKey } to the same URL.
 function doPost(e) {
-  if (e && e.parameter && e.parameter.tg) {
-    try {
-      handleTelegram_(JSON.parse((e.postData && e.postData.contents) || '{}'), e.parameter.tg);
-    } catch (err) {
-      Logger.log('Telegram update failed: ' + ((err && err.message) || err));
-    }
-    return ContentService.createTextOutput('ok');
-  }
   let req;
   try {
     req = JSON.parse((e && e.postData && e.postData.contents) || '{}');
   } catch (err) {
-    return json_({ ok: false, apiVersion: API_VERSION, error: 'Bad request: the body must be JSON.' });
+    return json_({ ok: false, apiVersion: API_VERSION, build: BUILD, error: 'Bad request: the body must be JSON.' });
   }
+  if (req && req.telegram) return json_({ ok: relayTelegram_(req), build: BUILD });
   return json_(handle_(req));
 }
 
 // Pure request → response. Kept apart from doPost so the tests can call it directly.
 function handle_(req) {
+  freshReads_();
+  const fail = function (extra) { return Object.assign({ ok: false, apiVersion: API_VERSION, build: BUILD }, extra); };
   try {
     req = req || {};
     const route = ROUTES[req.action];
     if (!route) throw new Error('Unknown action "' + req.action + '".');
-    const owner = req.key ? checkKey_(req.key) : false;
-    if (req.key && !owner) return { ok: false, apiVersion: API_VERSION, auth: false, error: 'Wrong passkey.' };
-    if (route.auth && !owner) return { ok: false, apiVersion: API_VERSION, auth: false, error: 'Log in to make changes.' };
+    const owner = req.key ? checkKey_(req.key, req.device) : false;
+    if (req.key && !owner) return fail({ auth: false, error: 'Wrong passkey.' });
+    if (route.auth && !owner) return fail({ auth: false, error: 'Log in to make changes.' });
     const result = route.write ? withLock_(function () { return route.run(req); }) : route.run(req);
     const snap = snapshot_(owner);
-    return { ok: true, apiVersion: API_VERSION, owner: owner, result: result, cellar: snap.cellar, drunk: snap.drunk };
+    const look = lookups_();
+    return {
+      ok: true, apiVersion: API_VERSION, build: BUILD, owner: owner, result: result,
+      cellar: snap.cellar, consumed: snap.consumed, lists: look.lists, settings: look.settings,
+    };
   } catch (err) {
-    return { ok: false, apiVersion: API_VERSION, error: String((err && err.message) || err) };
+    return fail({ error: String((err && err.message) || err) });
   }
 }
 
@@ -184,7 +281,7 @@ function updateWine_(id, input) {
 
 function removeWine_(id) {
   const found = findAnywhere_(id);
-  found.tab.sh.deleteRow(found.row);
+  deleteRow_(found.tab, found.row, found.rec.id);
   return { id: found.rec.id };
 }
 
@@ -196,13 +293,13 @@ function adjustBottles_(id, delta) {
   const found = findIn_(t, id);
   if (!found) throw new Error('That bottle is no longer in the cellar. Refresh the page.');
   const next = (found.rec.bottles || 1) + d;
-  if (next < 1) throw new Error('That would leave no bottles. Use "Drank one" or Delete instead.');
+  if (next < 1) throw new Error('That would leave no bottles. Use "Opened one" or Delete instead.');
   writeRow_(t, found.row, encode_(t, Object.assign({}, found.rec, { bottles: next, updated: timestamp_() }), found.cells));
   return { id: found.rec.id, bottles: next };
 }
 
-// Moves `count` bottles (default 1) from Cellar to Drunk, one Drunk row per bottle.
-// Drunk rows are written first, so a failure part-way can never lose a bottle.
+// Moves `count` bottles (default 1) from Cellar to Consumed, one Consumed row per bottle.
+// Consumed rows are written first, so a failure part-way can never lose a bottle.
 function drinkWine_(id, input) {
   const d = input || {};
   const cellar = table_('Cellar');
@@ -213,22 +310,22 @@ function drinkWine_(id, input) {
   const have = found.rec.bottles || 1;
   if (count > have) throw new Error(have === 1 ? 'There is only 1 bottle of this wine.' : 'There are only ' + have + ' bottles of this wine.');
 
-  const details = clean_('Drunk', { drunkOn: d.drunkOn, rating: d.rating, notes: d.notes }, true);
-  const drunk = table_('Drunk');
+  const details = clean_('Consumed', { consumedOn: d.consumedOn, rating: d.rating, notes: d.notes }, true);
+  const consumed = table_('Consumed');
   const now = timestamp_();
   const ids = [];
   for (let i = 0; i < count; i++) {
     const rec = {};
-    SCHEMA.Drunk.forEach(function (f) { if (f in found.rec) rec[f] = found.rec[f]; });
+    SCHEMA.Consumed.forEach(function (f) { if (f in found.rec) rec[f] = found.rec[f]; });
     Object.assign(rec, {
       id: newId_(),
-      drunkOn: details.drunkOn || today_(),
+      consumedOn: details.consumedOn || today_(),
       rating: 'rating' in d ? details.rating : null,
       notes: 'notes' in d ? details.notes : found.rec.notes,
       created: now,
       updated: now,
     });
-    appendRow_(drunk, encode_(drunk, rec));
+    appendRow_(consumed, encode_(consumed, rec));
     ids.push(rec.id);
   }
 
@@ -236,15 +333,15 @@ function drinkWine_(id, input) {
   if (left > 0) {
     writeRow_(cellar, found.row, encode_(cellar, Object.assign({}, found.rec, { bottles: left, updated: now }), found.cells));
   } else {
-    cellar.sh.deleteRow(found.row);
+    deleteRow_(cellar, found.row, found.rec.id);
   }
-  return { drunkIds: ids, left: left };
+  return { consumedIds: ids, left: left };
 }
 
 function snapshot_(owner) {
   const visible = function (rec) { return owner || !rec.hidden; };
   const recs = function (name) { return readRows_(table_(name)).map(function (r) { return r.rec; }).filter(visible); };
-  return { cellar: recs('Cellar'), drunk: recs('Drunk') };
+  return { cellar: recs('Cellar'), consumed: recs('Consumed') };
 }
 
 /* ============================== Validation ============================== */
@@ -271,8 +368,10 @@ function cleanValue_(field, value) {
   if (rule.type === 'bool') return value === true || value === 'true' || value === 'TRUE';
   if (isBlank_(value)) return null;
   const s = String(value).trim();
+  if (field === 'storage' && s === '-') return null;  // older rows used "-" for "nowhere in particular"
   if (rule.type === 'int' || rule.type === 'number') {
-    const n = Number(s.replace(/[,\s]/g, '').replace(/^S?\$/i, ''));
+    // Drop thousands separators and any currency in front: "S$1,200", "$45", "€ 30", "USD 80".
+    const n = Number(s.replace(/[,\s]/g, '').replace(/^[^\d.\-]+/, ''));
     const whole = rule.type === 'int';
     if (!isFinite(n) || (whole && !Number.isInteger(n)) || n < rule.min || n > rule.max) {
       throw new Error(rule.label + ' must be ' + (whole ? 'a whole number' : 'a number') + ' from ' + rule.min + ' to ' + rule.max + '.');
@@ -281,7 +380,16 @@ function cleanValue_(field, value) {
   }
   if (rule.type === 'date' && !/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new Error(rule.label + ' must be a date like 2026-11-27.');
   if (rule.type === 'enum' && rule.values.indexOf(s) < 0) throw new Error(rule.label + ' must be one of: ' + rule.values.join(', ') + '.');
+  if (LIST_FIELDS[field]) return matchList_(s, LIST_FIELDS[field](lookups_().lists)).slice(0, 1000);
   return s.slice(0, 1000);
+}
+
+// Returns the list's spelling if `s` matches an entry ignoring case, accents and extra spaces,
+// otherwise `s` as typed. Values not in the list are allowed.
+function matchList_(s, list) {
+  const key = function (v) { return fold_(v).replace(/\s+/g, ' ').trim(); };
+  const k = key(s);
+  return list.filter(function (v) { return key(v) === k; })[0] || s.replace(/\s+/g, ' ');
 }
 
 // "Jadot | Gevrey-Chambertin | 2018" and "jadot | gevrey chambertin | 2018" are the same wine.
@@ -294,23 +402,41 @@ function wineKey_(w) {
 
 /* ============================== Sheet access ============================== */
 
-// A tab plus where each schema field sits in it, looked up by header name.
+// Reads are cached for the length of one request (or timer run): each tab is read once, and
+// re-read only after this request writes to it. Every entry point starts with freshReads_(),
+// so hand edits in the sheet between requests are always picked up.
+let READS_ = {};
+function freshReads_() { READS_ = {}; }
+
+// A tab plus where each schema field sits in it, looked up by header name. The header and the
+// rows come from a single read.
 function table_(name) {
+  if (READS_[name]) return READS_[name];
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
   if (!sh) throw new Error('No "' + name + '" tab. Run setup() in the script editor.');
   const width = Math.max(sh.getLastColumn(), 1);
-  const header = sh.getRange(1, 1, 1, width).getDisplayValues()[0].map(trim_);
+  const values = sh.getRange(1, 1, Math.max(sh.getLastRow(), 1), width).getDisplayValues();
+  const header = values[0].map(trim_);
   const col = {};
   header.forEach(function (h, i) { if (h && !(h in col)) col[h] = i; });
   const missing = SCHEMA[name].filter(function (f) { return !(f in col); });
   if (missing.length) throw new Error('The ' + name + ' tab is missing columns: ' + missing.join(', ') + '. Run migrate().');
-  return { name: name, sh: sh, col: col, width: width };
+  const t = { name: name, sh: sh, col: col, width: width, rows: null };
+  t.rows = rowsFrom_(t, values.slice(1));
+  READS_[name] = t;
+  return t;
 }
 
 function readRows_(t) {
-  const last = t.sh.getLastRow();
-  if (last < 2) return [];
-  return t.sh.getRange(2, 1, last - 1, t.width).getDisplayValues()
+  if (!t.rows) {
+    const last = t.sh.getLastRow();
+    t.rows = last < 2 ? [] : rowsFrom_(t, t.sh.getRange(2, 1, last - 1, t.width).getDisplayValues());
+  }
+  return t.rows;
+}
+
+function rowsFrom_(t, values) {
+  return values
     .map(function (cells, i) { return { row: i + 2, cells: cells, rec: decode_(t, cells) }; })
     .filter(function (r) { return r.rec.id; });
 }
@@ -348,7 +474,7 @@ function parseCell_(field, text) {
   const rule = FIELD_RULES[field] || {};
   const s = text === null || text === undefined ? '' : String(text);
   if (rule.type === 'bool') return /^true$/i.test(s);
-  if (s === '') return null;
+  if (s === '' || (field === 'storage' && s.trim() === '-')) return null;
   if (rule.type === 'int' || rule.type === 'number') {
     const n = Number(s.replace(/[^0-9.\-]/g, ''));
     return isFinite(n) ? n : null;
@@ -365,25 +491,105 @@ function formatCell_(field, value) {
 }
 
 function appendRow_(t, cells) {
-  writeRow_(t, t.sh.getLastRow() + 1, cells);
+  t.sh.getRange(t.sh.getLastRow() + 1, 1, 1, cells.length).setNumberFormat('@').setValues([cells]);
+  t.rows = null;
 }
 
+// Overwrites an existing row. The row number was read earlier in this request, so first check
+// it still holds the same bottle: sorting or inserting rows by hand in the sheet can move it.
 function writeRow_(t, row, cells) {
-  t.sh.getRange(row, 1, 1, cells.length).setNumberFormat('@').setValues([cells]);
+  const at = rowFor_(t, row, cells[t.col.id]);
+  t.sh.getRange(at, 1, 1, cells.length).setNumberFormat('@').setValues([cells]);
+  t.rows = null;
+}
+
+function deleteRow_(t, row, id) {
+  t.sh.deleteRow(rowFor_(t, row, id));
+  t.rows = null;
+}
+
+function rowFor_(t, row, id) {
+  if (trim_(t.sh.getRange(row, t.col.id + 1).getDisplayValues()[0][0]) === String(id)) return row;
+  t.rows = null;  // the sheet moved under us: look the bottle up again
+  const found = readRows_(t).filter(function (r) { return r.rec.id === String(id); })[0];
+  if (!found) throw new Error('The sheet changed while saving. Try again.');
+  return found.row;
+}
+
+/* ---------- Lists and Settings tabs ---------- */
+
+// Reads the Lists and Settings tabs (once per request). Missing tabs, columns or values fall
+// back to DEFAULT_LISTS and SETTINGS, so the app works before migrate() creates them.
+// `problems` lists settings that were ignored; status() shows them.
+function lookups_() {
+  if (READS_.lookups) return READS_.lookups;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const read = function (name) {
+    const sh = ss.getSheetByName(name);
+    if (!sh || sh.getLastRow() < 1) return null;
+    const v = sh.getRange(1, 1, sh.getLastRow(), Math.max(sh.getLastColumn(), 1)).getDisplayValues();
+    const head = v[0].map(function (h) { return trim_(h).toLowerCase(); });
+    return { rows: v.slice(1), at: function (h) { return head.indexOf(h.toLowerCase()); } };
+  };
+
+  const lists = { colours: DEFAULT_LISTS.colours, grapes: DEFAULT_LISTS.grapes, storage: DEFAULT_LISTS.storage };
+  const l = read(LOOKUP_TABS.lists);
+  if (l) {
+    const column = function (h) {
+      const i = l.at(h);
+      return i < 0 ? null : l.rows.map(function (r) { return trim_(r[i]); }).filter(Boolean);
+    };
+    const c = l.at('colour');
+    const tone = l.at('colourTone');
+    if (c >= 0) {
+      lists.colours = l.rows.filter(function (r) { return trim_(r[c]); }).map(function (r) {
+        const t = fold_(tone >= 0 ? r[tone] : '').trim();
+        return { name: trim_(r[c]), tone: t === 'white' || t === 'rose' ? t : 'red' };
+      });
+    }
+    if (column('grape')) lists.grapes = column('grape');
+    if (column('storage')) lists.storage = column('storage');
+  }
+
+  const settings = {};
+  const problems = [];
+  Object.keys(SETTINGS).forEach(function (k) { settings[k] = SETTINGS[k].value; });
+  const s = read(LOOKUP_TABS.settings);
+  if (s && s.at('setting') >= 0 && s.at('value') >= 0) {
+    s.rows.forEach(function (r) {
+      const key = trim_(r[s.at('setting')]);
+      const raw = trim_(r[s.at('value')]);
+      if (!SETTINGS[key] || raw === '') return;
+      const ok = SETTINGS[key].check(raw);
+      if (ok === null) problems.push(key + ' "' + raw + '" isn\'t valid, so ' + SETTINGS[key].value + ' is used. ' + SETTINGS[key].about + '.');
+      else settings[key] = ok;
+    });
+  }
+  READS_.lookups = { lists: lists, settings: settings, problems: problems };
+  return READS_.lookups;
 }
 
 /* ============================== Passkey ============================== */
 
-function checkKey_(key) {
+// `device` is a random id the page keeps in the browser, so wrong passkeys from one device
+// lock out only that device. A higher limit across all devices is the backstop.
+function checkKey_(key, device) {
   const cache = CacheService.getScriptCache();
-  const fails = Number(cache.get('failedLogins') || 0);
-  if (fails >= AUTH.maxFailedLogins) throw new Error('Too many wrong passkeys. Try again in 10 minutes.');
+  const dev = 'failedLogins:' + (/^[A-Za-z0-9_-]{8,64}$/.test(String(device || '')) ? device : 'unknown');
+  const fails = Number(cache.get(dev) || 0);
+  const allFails = Number(cache.get('failedLogins:all') || 0);
+  if (fails >= AUTH.maxFailedLogins || allFails >= AUTH.maxFailedLoginsAll) {
+    throw new Error('Too many wrong passkeys. Try again in 10 minutes.');
+  }
   const props = PropertiesService.getScriptProperties();
   const salt = props.getProperty('PASS_SALT');
   const hash = props.getProperty('PASS_HASH');
   if (!salt || !hash) throw new Error('No passkey set yet. Run setPassword() in the script editor.');
   const ok = sha256_(salt + String(key)) === hash;
-  if (!ok) cache.put('failedLogins', String(fails + 1), AUTH.lockoutSeconds);
+  if (!ok) {
+    cache.put(dev, String(fails + 1), AUTH.lockoutSeconds);
+    cache.put('failedLogins:all', String(allFails + 1), AUTH.lockoutSeconds);
+  }
   return ok;
 }
 
@@ -395,64 +601,85 @@ function sha256_(text) {
 
 /* ============================== Telegram bot (optional) ============================== */
 //
-// Reminders go out once a day from a timer; commands arrive as webhook POSTs to doPost.
-// Only your chat is answered, and every update must carry the secret in the webhook URL.
-// The token, chat id and secret live in Script Properties, never in this file.
+// Messages reach the bot in one of two ways:
+//   Relay (fast, replies in seconds): Telegram → Cloudflare Worker (relay/worker.mjs) → doPost.
+//     Telegram can't call Apps Script directly: Apps Script answers with a 302 redirect, which
+//     Telegram treats as a failure, and messages queue up unanswered. The Worker answers Telegram
+//     itself and passes each message on. Set up with relaySecret() → installTelegramRelay().
+//   Polling (fallback, replies within a minute): a timer runs pollTelegram(). Set up with installTelegram().
+// Either way an hourly timer runs sendReminders(), which sends once a day at the reminderHour
+// set in the Settings tab (so changing the hour there needs no reinstall).
+// Only your chat is answered. The token, chat id and relay secret live in Script Properties;
+// status() lists everything stored there.
 
-const BOT = { currency: 'S$', reminderHour: 9, maxButtons: 30 };
+const BOT = { maxButtons: 30 };
 
-// Run once from the editor. Paste your token and web app URL, run, then put the placeholders back.
+// Run once from the editor. Paste your token, run, then put the placeholder back.
 function setTelegram() {
   const token = 'paste-your-bot-token-here';
-  const webAppUrl = 'paste-your-web-app-url-here';
-  if (token.indexOf('paste-') === 0 || webAppUrl.indexOf('paste-') === 0) {
-    throw new Error('Paste your bot token and web app URL into setTelegram(), then run it again.');
-  }
+  if (token.indexOf('paste-') === 0) throw new Error('Paste your bot token into setTelegram(), then run it again.');
   if (!/^\d+:[\w-]{30,}$/.test(token)) throw new Error('That doesn\'t look like a bot token. Copy it again from @BotFather.');
-  if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(webAppUrl)) {
-    throw new Error('The web app URL should start with https://script.google.com/ and end in /exec.');
-  }
-  PropertiesService.getScriptProperties().setProperties({
-    TELEGRAM_TOKEN: token,
-    TELEGRAM_URL: webAppUrl,
-    TELEGRAM_SECRET: Utilities.getUuid().replace(/-/g, ''),
-  });
-  Logger.log('Saved. Send your bot a message in Telegram, then run findTelegramChatId(). Put the placeholders back afterwards.');
+  PropertiesService.getScriptProperties().setProperties({ TELEGRAM_TOKEN: token });
+  Logger.log('Saved. Send your bot a message in Telegram, then run findTelegramChatId(). Put the placeholder back afterwards.');
 }
 
 // Finds your chat from the last message you sent the bot, and saves it as the only chat it answers.
 function findTelegramChatId() {
-  let updates;
-  try {
-    updates = telegramApi_('getUpdates', {}).result;
-  } catch (err) {
-    throw new Error(String(err.message) + ' (If the bot is already installed, run uninstallTelegram() first.)');
-  }
+  telegramApi_('deleteWebhook', {});  // getUpdates refuses to work while a webhook is set
+  const updates = telegramApi_('getUpdates', {}).result;
   const msgs = updates.filter(function (u) { return u.message && u.message.chat; }).map(function (u) { return u.message; });
   if (!msgs.length) throw new Error('No messages yet. Send your bot "hi" in Telegram, then run this again.');
   const chat = msgs[msgs.length - 1].chat;
   PropertiesService.getScriptProperties().setProperties({ TELEGRAM_CHAT_ID: String(chat.id) });
   telegramSend_('Cellar bot connected 🍷\nRun installTelegram() in Apps Script to turn on commands and reminders.');
-  Logger.log('Connected to ' + (chat.first_name || chat.title || 'chat') + ' (' + chat.id + '). Now run migrate(), then installTelegram().');
+  Logger.log('Connected to ' + (chat.first_name || chat.title || 'chat') + ' (' + chat.id + '). Now run installTelegram().');
 }
 
-// Turns on commands (webhook) and the daily reminders. Safe to run again.
+// Turns on commands (checked every minute) and the daily reminders. Safe to run again.
+// Messages sent before this are dropped, so you don't get a burst of stale replies.
 function installTelegram() {
-  const cfg = telegramConfig_();
-  telegramApi_('setWebhook', { url: cfg.url + '?tg=' + cfg.secret, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true });
-  telegramApi_('setMyCommands', { commands: Object.keys(TG_COMMANDS).filter(function (c) { return TG_COMMANDS[c].menu; })
-    .map(function (c) { return { command: c, description: TG_COMMANDS[c].help }; }) });
-  replaceTrigger_('pollTelegram', null);
-  replaceTrigger_('sendReminders', function (b) { return b.everyDays(1).atHour(BOT.reminderHour); });
-  Logger.log('Done. Try /help in Telegram. Reminders go out at ' + BOT.reminderHour + ':00 (Project Settings time zone) when something is due.');
+  telegramConfig_();
+  telegramApi_('deleteWebhook', { drop_pending_updates: true });
+  setBotCommands_();
+  replaceTrigger_('pollTelegram', function (b) { return b.everyMinutes(1); });
+  replaceTrigger_('sendReminders', function (b) { return b.everyHours(1); });
+  forgetOldSettings_(false);
+  Logger.log('Done. Try /help in Telegram; replies take up to a minute. Reminders go out at ' +
+    lookups_().settings.reminderHour + ':00 (Project Settings time zone) when something is due.');
 }
 
-// Fallback if commands get no reply (check with telegramStatus): checks for messages every minute instead.
-function installTelegramPolling() {
+// Relay step 1: makes the secret shared by Telegram, the Worker and this script, and shows it.
+// Paste it into the Worker as the RELAY_SECRET secret. Running it again shows the same one.
+function relaySecret() {
+  const props = PropertiesService.getScriptProperties();
+  let secret = props.getProperty('TELEGRAM_RELAY_SECRET');
+  if (!secret) {
+    secret = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
+    props.setProperties({ TELEGRAM_RELAY_SECRET: secret });
+  }
+  Logger.log('RELAY_SECRET for Cloudflare: ' + secret);
+  return secret;
+}
+
+// Relay step 2, after the Worker is deployed: paste its URL, run, then put the placeholder back.
+function installTelegramRelay() {
+  const workerUrl = 'paste-your-worker-url-here';
+  if (workerUrl.indexOf('paste-') === 0) throw new Error('Paste your Worker URL into installTelegramRelay(), then run it again.');
+  installTelegramRelay_(workerUrl);
+}
+
+// Points Telegram at the Worker, stops polling, and keeps the daily reminders.
+function installTelegramRelay_(workerUrl) {
   telegramConfig_();
-  telegramApi_('deleteWebhook', {});
-  replaceTrigger_('pollTelegram', function (b) { return b.everyMinutes(1); });
-  Logger.log('Polling every minute. Replies can take up to a minute.');
+  if (!/^https:\/\/[^\s/]+(\/\S*)?$/.test(workerUrl)) throw new Error('The Worker URL should start with https://, like https://cellar-relay.yourname.workers.dev');
+  const secret = PropertiesService.getScriptProperties().getProperty('TELEGRAM_RELAY_SECRET');
+  if (!secret) throw new Error('Run relaySecret() first and add it to the Worker.');
+  telegramApi_('setWebhook', { url: workerUrl, secret_token: secret, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true });
+  setBotCommands_();
+  replaceTrigger_('pollTelegram', null);
+  replaceTrigger_('sendReminders', function (b) { return b.everyHours(1); });
+  forgetOldSettings_(true);
+  Logger.log('Done. Try /help in Telegram; replies should take a few seconds. If nothing comes back, run installTelegram() to go back to checking every minute.');
 }
 
 // Stops commands and reminders. Your settings stay, so installTelegram() turns it back on.
@@ -463,37 +690,145 @@ function uninstallTelegram() {
   Logger.log('Commands and reminders are off.');
 }
 
+// Shows what Telegram reports: messages waiting, and the last error if there was one.
 function telegramStatus() {
   Logger.log(JSON.stringify(telegramApi_('getWebhookInfo', {}).result, null, 2));
 }
 
-// The daily timer calls this.
-function sendReminders() {
-  return sendReminders_(today_());
+/* ============================== status(): everything stored outside this file ============================== */
+
+// Run from the editor after any change. Lists, in one place, the state this script depends on
+// that isn't in the code: whether the web app runs this version, stored settings, timers,
+// Telegram, the time zone, and any Settings-tab values that were ignored.
+function status() {
+  freshReads_();
+  forgetOldSettings_(false);
+  const out = [];
+  const say = function (s) { out.push(s); };
+
+  say('Saved code: build ' + BUILD);
+  try {
+    const url = ScriptApp.getService().getUrl();
+    if (!url) {
+      say('Web app: not deployed yet (Deploy → New deployment).');
+    } else {
+      const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+      let body = null;
+      try { body = JSON.parse(res.getContentText()); } catch (err) { body = null; }
+      if (/\/dev$/.test(url) || !body || typeof body !== 'object' || !('ok' in body)) {
+        // Not the web app's JSON (a test URL, a sign-in page…): don't guess, say so.
+        say('Web app: couldn\'t check (' + url + ' didn\'t answer with the cellar\'s data). Open your /exec URL in a browser: it should show "build":"' + BUILD + '".');
+      } else if (body.build === BUILD) {
+        say('Web app: running this build. ✓');
+      } else {
+        say('Web app: running ' + (body.build ? 'build ' + body.build : 'an older version') +
+          '. Deploy → Manage deployments → ✏️ → Version: New version → Deploy.');
+      }
+    }
+  } catch (err) {
+    say('Web app: couldn\'t check (' + ((err && err.message) || err) + ').');
+  }
+
+  say('Time zone: ' + Session.getScriptTimeZone() + ' (today is ' + today_() + '). Reminders and "opened today" use this.');
+
+  const secret = ['PASS_SALT', 'PASS_HASH', 'TELEGRAM_TOKEN', 'TELEGRAM_RELAY_SECRET'];
+  const props = PropertiesService.getScriptProperties().getProperties();
+  say('Stored settings (Project Settings → Script properties):');
+  Object.keys(props).sort().forEach(function (k) {
+    const v = String(props[k]);
+    say('  ' + k + ' = ' + (secret.indexOf(k) >= 0 ? '(set, hidden)' : v.length > 40 ? v.slice(0, 40) + '…' : v));
+  });
+
+  const triggers = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
+  say('Timers: ' + (triggers.length ? triggers.join(', ') : 'none'));
+
+  if (props.TELEGRAM_TOKEN) {
+    try {
+      const info = telegramApi_('getWebhookInfo', {}).result;
+      say('Telegram: ' + (info.url ? 'relay at ' + info.url : 'polling every minute') +
+        (info.pending_update_count ? ', ' + info.pending_update_count + ' waiting' : '') +
+        (info.last_error_message ? ', last error: ' + info.last_error_message : ''));
+    } catch (err) {
+      say('Telegram: ' + ((err && err.message) || err));
+    }
+  }
+
+  const look = lookups_();
+  say('Settings tab: ' + Object.keys(look.settings).map(function (k) { return k + ' ' + look.settings[k]; }).join(', '));
+  look.problems.forEach(function (p) { say('  ⚠ ' + p); });
+  say('Lists tab: ' + look.lists.colours.length + ' colours, ' + look.lists.grapes.length + ' grapes, ' +
+    look.lists.storage.length + ' storage places.');
+
+  Logger.log(out.join('\n'));
+  return out;
 }
 
-// The every-minute timer calls this when polling is on. Every update fetched is marked as done,
-// including ones the bot ignores (other chats), so Telegram doesn't send them again.
+// Removes Script Properties that older versions of this script used and nothing reads now.
+// TG_LAST_UPDATE is only needed while polling, so it goes when the relay is installed.
+function forgetOldSettings_(relayOn) {
+  const props = PropertiesService.getScriptProperties();
+  ['TELEGRAM_URL', 'TELEGRAM_SECRET'].concat(relayOn ? ['TG_LAST_UPDATE'] : [])
+    .forEach(function (k) { if (props.getProperty(k) !== null) props.deleteProperty(k); });
+}
+
+// The hourly timer calls this. It sends at most once a day, from the reminderHour in Settings.
+function sendReminders() {
+  return sendReminders_(today_(), Number(Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'H')));
+}
+
+// The every-minute timer calls this when polling (not the relay) is on. Every update fetched is
+// marked as done, including ones the bot ignores (other chats), so Telegram doesn't send them
+// again. TG_LAST_UPDATE is polling's bookmark; the relay doesn't use it.
 function pollTelegram() {
-  const cfg = telegramConfig_();
+  freshReads_();
+  telegramConfig_();
   const props = PropertiesService.getScriptProperties();
   const last = Number(props.getProperty('TG_LAST_UPDATE') || 0);
   const updates = telegramApi_('getUpdates', { offset: last + 1, timeout: 0, allowed_updates: ['message', 'callback_query'] }).result;
-  updates.forEach(function (u) { handleTelegram_(u, cfg.secret); });
+  updates.forEach(function (u) {
+    try {
+      handleTelegram_(u);
+    } catch (err) {
+      Logger.log('Telegram update ' + u.update_id + ' failed: ' + ((err && err.message) || err));
+    }
+  });
   const newest = updates.reduce(function (n, u) { return Math.max(n, u.update_id); }, 0);
   withLock_(function () {
     if (newest > Number(props.getProperty('TG_LAST_UPDATE') || 0)) props.setProperties({ TG_LAST_UPDATE: String(newest) });
   });
 }
 
+// An update passed on by the Worker. Only accepted with the shared secret.
+function relayTelegram_(req) {
+  const secret = PropertiesService.getScriptProperties().getProperty('TELEGRAM_RELAY_SECRET');
+  if (!secret || req.relayKey !== secret) return false;
+  try {
+    return handleTelegram_(req.telegram);
+  } catch (err) {
+    Logger.log('Telegram update failed: ' + ((err && err.message) || err));
+    return false;
+  }
+}
+
+function setBotCommands_() {
+  telegramApi_('setMyCommands', { commands: Object.keys(TG_COMMANDS).filter(function (c) { return TG_COMMANDS[c].menu; })
+    .map(function (c) { return { command: c, description: TG_COMMANDS[c].help }; }) });
+}
+
 /* ---------- Reminders ---------- */
 
-function sendReminders_(today) {
+// `hour` comes from the hourly timer: nothing happens before reminderHour, or twice in a day.
+// Called without `hour` (from tests or by hand) it always checks.
+function sendReminders_(today, hour) {
+  freshReads_();
   const props = PropertiesService.getScriptProperties();
-  let sent = {};
-  try { sent = JSON.parse(props.getProperty('REMINDERS_SENT') || '{}'); } catch (err) { sent = {}; }
+  const settings = lookups_().settings;
+  if (hour !== undefined) {
+    if (hour < settings.reminderHour || props.getProperty('REMINDER_DAY') === today) return 0;
+  }
+  const sent = readReminderLog_();
   const recs = readRows_(table_('Cellar')).map(function (r) { return r.rec; });
-  const due = remindersDue_(recs, today, sent);
+  const due = remindersDue_(recs, today, sent, settings);
   if (due.length) {
     telegramSendLong_(['<b>Cellar reminders</b>'].concat(due.map(function (d) { return d.text; })).join('\n\n'));
     due.forEach(function (d) { sent[d.key] = today; });
@@ -507,16 +842,46 @@ function sendReminders_(today) {
     const parts = k.split('|');
     if (!ids[parts[0]] || sent[k] < yearAgo || (parts[1] === 'nudge' && sent[k] < weekAgo)) delete sent[k];
   });
-  props.setProperties({ REMINDERS_SENT: JSON.stringify(sent) });
+  writeReminderLog_(sent);
+  if (hour !== undefined) props.setProperties({ REMINDER_DAY: today });  // only once sending worked
   return due.length;
+}
+
+// Reminders already sent, as { key: date }, from the hidden "Reminders log" tab. (They used to be
+// kept in one Script Property, which is capped at 9 KB; an old one is moved across here.)
+function readReminderLog_() {
+  const props = PropertiesService.getScriptProperties();
+  const sent = {};
+  const old = props.getProperty('REMINDERS_SENT');
+  if (old) {
+    try { Object.assign(sent, JSON.parse(old)); } catch (err) { /* unreadable: start fresh */ }
+  }
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(LOOKUP_TABS.log);
+  if (sh && sh.getLastRow() > 1) {
+    sh.getRange(2, 1, sh.getLastRow() - 1, 2).getDisplayValues().forEach(function (r) {
+      if (trim_(r[0])) sent[trim_(r[0])] = trim_(r[1]);
+    });
+  }
+  return sent;
+}
+
+function writeReminderLog_(sent) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(LOOKUP_TABS.log);
+  if (!sh) sh = ss.insertSheet(LOOKUP_TABS.log).hideSheet();
+  writeTab_(sh, [['key', 'sentOn']].concat(Object.keys(sent).sort().map(function (k) { return [k, sent[k]]; })));
+  PropertiesService.getScriptProperties().deleteProperty('REMINDERS_SENT');
 }
 
 // Pure: which reminders are due today. `sent` holds the keys already sent, so nothing repeats.
 // The year or date is part of each key, so changing a bottle's window or date re-arms it.
-function remindersDue_(recs, today, sent) {
+function remindersDue_(recs, today, sent, settings) {
+  const s = settings || lookups_().settings;
   const year = Number(today.slice(0, 4));
   const tomorrow = addDays_(today, 1);
-  const monday = new Date(today + 'T12:00:00Z').getUTCDay() === 1;
+  const nudgeToday = WEEKDAYS[new Date(today + 'T12:00:00Z').getUTCDay()] === s.nudgeDay;
+  // closeReminderMonths 6 → from 1 July of the window's last year; 0 → no closing reminder.
+  const closeFrom = s.closeReminderMonths ? '-' + ('0' + (13 - s.closeReminderMonths)).slice(-2) + '-01' : null;
   const out = [];
   const add = function (key, text) { if (!(key in sent)) out.push({ key: key, text: text }); };
   sortCellar_(recs).forEach(function (w) {
@@ -524,16 +889,16 @@ function remindersDue_(recs, today, sent) {
     if (win && year === win.from) {
       add(w.id + '|open|' + win.from, '🍷 <b>Ready to drink</b> from this year\n' + bottleLine_(w));
     }
-    if (win && year === win.to && today >= win.to + '-07-01') {
+    if (win && closeFrom && year === win.to && today >= win.to + closeFrom) {
       add(w.id + '|close|' + win.to, '⏳ <b>Drink by December</b>, its window closes this year\n' + bottleLine_(w));
     }
     if (w.status !== 'To collect') return;
-    const where = w.storage && w.storage !== '-' ? '\n' + escH_(w.storage) : '';
+    const where = w.storage ? '\n' + escH_(w.storage) : '';
     if (w.collectBy === tomorrow) {
       add(w.id + '|collect|' + w.collectBy + '|before', '📦 <b>Collect tomorrow</b>\n' + bottleLine_(w) + where);
     } else if (w.collectBy === today) {
       add(w.id + '|collect|' + w.collectBy + '|day', '📦 <b>Collect today</b>\n' + bottleLine_(w) + where);
-    } else if (monday && (!w.collectBy || w.collectBy < today)) {
+    } else if (nudgeToday && (!w.collectBy || w.collectBy < today)) {
       const late = w.collectBy ? ' (was due ' + niceDate_(w.collectBy) + ')' : '';
       add(w.id + '|nudge|' + today, '📦 <b>Still to collect</b>' + late + '\n' + bottleLine_(w) + where);
     }
@@ -562,7 +927,7 @@ const TG_COMMANDS = {
     if (!recs.length) return { text: 'Nothing to collect.' };
     return { text: '<b>To collect</b>\n\n' + recs.map(function (w) {
       return bottleLine_(w) + (w.collectBy ? '\nCollect by ' + niceDate_(w.collectBy) : '') +
-        (w.storage && w.storage !== '-' ? '\n' + escH_(w.storage) : '');
+        (w.storage ? '\n' + escH_(w.storage) : '');
     }).join('\n\n') };
   } },
   search: { menu: true, help: 'Find a bottle, e.g. /search romanee', run: function (q) {
@@ -576,12 +941,12 @@ const TG_COMMANDS = {
     return { text: [
       '<b>' + sum(recs.filter(function (w) { return w.status === 'In cellar'; })) + '</b> in the cellar',
       '<b>' + sum(recs.filter(function (w) { return w.status === 'To collect'; })) + '</b> to collect',
-      '<b>' + readRows_(table_('Drunk')).length + '</b> drunk',
-      '<b>' + escH_(BOT.currency) + money_(value) + '</b> on the shelf',
+      '<b>' + readRows_(table_('Consumed')).length + '</b> consumed',
+      '<b>' + escH_(lookups_().settings.currency) + money_(value) + '</b> on the shelf',
     ].join('\n') };
   } },
-  drank: { menu: true, help: 'Record a bottle you drank', run: function (q) {
-    return pickBottle_('drink', q, cellarRecs_(), 'Which one did you drink?');
+  opened: { menu: true, help: 'Record a bottle you opened', run: function (q) {
+    return pickBottle_('drink', q, cellarRecs_(), 'Which one did you open?');
   } },
   collected: { menu: true, help: 'Mark a bottle as collected', run: function (q) {
     return pickBottle_('coll', q, cellarRecs_().filter(function (w) { return w.status === 'To collect'; }), 'Which one did you collect?');
@@ -592,16 +957,17 @@ const TG_COMMANDS = {
   help: { menu: true, help: 'What I can do', run: function () {
     return { text: Object.keys(TG_COMMANDS).filter(function (c) { return TG_COMMANDS[c].menu; })
       .map(function (c) { return '/' + c + ' · ' + escH_(TG_COMMANDS[c].help); }).join('\n') +
-      '\n\nOr just type a name to search. Reminders arrive at ' + BOT.reminderHour + ':00 when something is due.' };
+      '\n\nOr just type a name to search. Reminders arrive at ' + lookups_().settings.reminderHour + ':00 when something is due.' };
   } },
 };
 TG_COMMANDS.start = { help: '', run: TG_COMMANDS.help.run };
+TG_COMMANDS.drank = { help: '', run: TG_COMMANDS.opened.run };  // the old name still works
 
 // What tapping a bottle's button does. Each returns the text that replaces the buttons.
 const TG_ACTIONS = {
   drink: function (w) {
     const res = withLock_(function () { return drinkWine_(w.id, {}); });
-    return '🍷 Drank ' + bottleLine_(w, true) + '\n' + (res.left ? res.left + ' left' : 'That was the last one') + '. Add a rating on the website.';
+    return '🍷 Opened ' + bottleLine_(w, true) + '\n' + (res.left ? res.left + ' left' : 'That was the last one') + '. Add a rating on the website.';
   },
   coll: function (w) {
     if (w.status !== 'To collect') return bottleLine_(w, true) + ' is already in the cellar.';
@@ -614,20 +980,24 @@ const TG_ACTIONS = {
   },
 };
 
-// Entry point for every update, from the webhook or from polling. Returns true if it was handled.
-function handleTelegram_(update, secret) {
+// Handles one update, from the relay or from polling. Returns true if it was answered.
+function handleTelegram_(update) {
+  freshReads_();
   const props = PropertiesService.getScriptProperties();
-  const want = props.getProperty('TELEGRAM_SECRET');
-  if (!want || secret !== want || !update || typeof update.update_id !== 'number') return false;
+  if (!update || typeof update.update_id !== 'number') return false;
   const cb = update.callback_query;
   const msg = update.message || (cb && cb.message);
   const chatId = props.getProperty('TELEGRAM_CHAT_ID');
   if (!msg || !msg.chat || !chatId || String(msg.chat.id) !== chatId) return false;
 
-  // Telegram retries when it doesn't like the response, so each update is handled once only.
+  // Each update is handled once only. Relayed updates can arrive out of order (two quick taps),
+  // so this remembers the ids it has seen rather than just the newest.
   const fresh = withLock_(function () {
-    if (update.update_id <= Number(props.getProperty('TG_LAST_UPDATE') || 0)) return false;
-    props.setProperties({ TG_LAST_UPDATE: String(update.update_id) });
+    let seen = [];
+    try { seen = JSON.parse(props.getProperty('TG_SEEN') || '[]'); } catch (err) { seen = []; }
+    if (seen.indexOf(update.update_id) >= 0) return false;
+    seen.push(update.update_id);
+    props.setProperties({ TG_SEEN: JSON.stringify(seen.slice(-200)) });
     return true;
   });
   if (!fresh) return false;
@@ -669,7 +1039,7 @@ function pickBottle_(act, q, recs, question) {
   const matches = q ? searchRecs_(recs, q) : sortCellar_(recs);
   if (!matches.length) return { text: q ? 'Nothing matches “' + escH_(q) + '”.' : 'No bottles to choose from.' };
   if (matches.length > BOT.maxButtons) {
-    return { text: matches.length + ' bottles match. Add a word or two, e.g. /' + ({ drink: 'drank', coll: 'collected', add1: 'add1' })[act] + ' duroche 2018' };
+    return { text: matches.length + ' bottles match. Add a word or two, e.g. /' + ({ drink: 'opened', coll: 'collected', add1: 'add1' })[act] + ' duroche 2018' };
   }
   return {
     text: question,
@@ -716,10 +1086,11 @@ function searchRecs_(recs, q) {
   }));
 }
 
-// Same order as the website: by colour, then producer, then vintage.
+// Same order as the website: by colour (in the Lists tab's order), then producer, then vintage.
 function sortCellar_(recs) {
-  const order = { Sparkling: 0, White: 1, 'Rosé': 2, Red: 3, Sweet: 4, Fortified: 5 };
-  const rank = function (w) { return w.colour in order ? order[w.colour] : 9; };
+  const order = {};
+  lookups_().lists.colours.forEach(function (c, i) { order[c.name] = i; });
+  const rank = function (w) { return w.colour in order ? order[w.colour] : 99; };
   return recs.slice().sort(function (a, b) {
     return rank(a) - rank(b) || String(a.producer).localeCompare(String(b.producer)) || (a.vintage || 0) - (b.vintage || 0);
   });
@@ -729,8 +1100,8 @@ function sortCellar_(recs) {
 
 function telegramConfig_() {
   const p = PropertiesService.getScriptProperties();
-  const cfg = { token: p.getProperty('TELEGRAM_TOKEN'), url: p.getProperty('TELEGRAM_URL'), secret: p.getProperty('TELEGRAM_SECRET'), chatId: p.getProperty('TELEGRAM_CHAT_ID') };
-  if (!cfg.token || !cfg.url || !cfg.secret) throw new Error('Run setTelegram() first.');
+  const cfg = { token: p.getProperty('TELEGRAM_TOKEN'), chatId: p.getProperty('TELEGRAM_CHAT_ID') };
+  if (!cfg.token) throw new Error('Run setTelegram() first.');
   if (!cfg.chatId) throw new Error('Send your bot a message in Telegram, then run findTelegramChatId().');
   return cfg;
 }
@@ -784,6 +1155,9 @@ function botError_(err) {
 function withLock_(fn) {
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
+  // Anything read before the lock may be out of date by now (another request may have written
+  // while this one waited), so locked work always starts from a fresh read of the sheet.
+  freshReads_();
   try {
     const result = fn();
     SpreadsheetApp.flush();
@@ -830,23 +1204,3 @@ function money_(n) { return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
-
-/* ============================== Starting data for setup() ============================== */
-
-const SEED = {
-  cellar: [
-    { producer: 'Leflaive', wine: 'Bourgogne Blanc', vintage: 2022, colour: 'White', grape: 'Chardonnay',
-      window: '2024–2030', bottles: 1, status: 'In cellar', storage: '-', price: 150 },
-    { producer: 'Jadot', wine: 'Gevrey-Chambertin', vintage: 2018, colour: 'Red', grape: 'Pinot Noir',
-      window: '2023–2033', bottles: 1, status: 'In cellar', storage: '-', price: 140 },
-    { producer: 'Duroche', wine: 'Vosne-Romanée', vintage: 2018, colour: 'Red', grape: 'Pinot Noir',
-      window: '2024–2035', bottles: 1, status: 'In cellar', storage: '-', price: 152 },
-    { producer: 'Coudray-Bizot', wine: 'Vosne-Romanée 1er Cru La Croix Rameau', vintage: 2020, colour: 'Red',
-      grape: 'Pinot Noir', window: '2027–2040', bottles: 1, status: 'In cellar', storage: '-', price: 313 },
-    { producer: 'A F Gros', wine: 'Moulin-à-Vent', vintage: 2023, colour: 'Red', grape: 'Gamay',
-      window: '2025–2029', bottles: 1, status: 'To collect', storage: 'Grand Cru, collect Fri 27 Nov', price: 54 },
-  ],
-  drunk: [
-    { producer: 'Penfolds', wine: 'Bin 128', vintage: 2024, colour: 'Red', grape: 'Shiraz', price: 88 },
-  ],
-};

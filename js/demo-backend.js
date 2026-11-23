@@ -4,10 +4,11 @@ import { config } from "./config.js";
 
 export async function createDemoBackend() {
   const [fakeSource, codeSource] = await Promise.all([load("dev/fake-gas.js"), load("apps-script/Code.gs")]);
-  const { createFakeGas, loadBackend } = new Function(`${fakeSource}\nreturn { createFakeGas, loadBackend };`)();
+  const { createFakeGas, loadBackend, SAMPLE_BOTTLES } =
+    new Function(`${fakeSource}\nreturn { createFakeGas, loadBackend, SAMPLE_BOTTLES };`)();
   const gas = createFakeGas();
   const backend = loadBackend(gas, codeSource);
-  backend.setup();
+  backend.setup(SAMPLE_BOTTLES);
   const salt = "demo";
   gas.PropertiesService.getScriptProperties().setProperties({
     PASS_SALT: salt,

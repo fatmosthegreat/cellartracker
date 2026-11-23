@@ -2,8 +2,8 @@
 // HTML comes from views.js.
 import { config } from "./config.js";
 import { call, isDemo } from "./api.js";
-import { todayISO, bottleCount } from "./format.js";
-import { titleHTML, statsHTML, timelineHTML, listHTML } from "./views.js";
+import { todayISO, bottleCount, esc } from "./format.js";
+import { titleHTML, statsHTML, timelineHTML, listHTML, tastingHTML, FALLBACK_LISTS } from "./views.js";
 
 const $ = (sel, el = document) => el.querySelector(sel);
 
@@ -17,7 +17,9 @@ const SNAPSHOT = isDemo ? "cellar.demo.snapshot" : "cellar.snapshot";
 
 const state = {
   cellar: [],
-  drunk: [],
+  consumed: [],
+  lists: FALLBACK_LISTS,  // colours, grapes, storage places: from the sheet's Lists tab
+  settings: {},           // currency etc.: from the sheet's Settings tab
   key: isDemo ? null : saved.get(KEY),
   owner: false,
   loaded: false,
@@ -26,13 +28,21 @@ const state = {
 };
 // Show the last copy straight away; Apps Script takes a second or two to answer.
 const snapshot = isDemo ? null : saved.get(SNAPSHOT);
-if (snapshot) Object.assign(state, { cellar: snapshot.cellar || [], drunk: snapshot.drunk || [], owner: !!state.key });
+if (snapshot) {
+  Object.assign(state, {
+    cellar: snapshot.cellar || [], consumed: snapshot.consumed || [], owner: !!state.key,
+    lists: snapshot.lists || FALLBACK_LISTS, settings: snapshot.settings || {},
+  });
+}
 
 /* ---------- Data ---------- */
 
 function apply(res) {
-  Object.assign(state, { cellar: res.cellar || [], drunk: res.drunk || [], owner: !!res.owner, loaded: true });
-  if (!isDemo) saved.set(SNAPSHOT, { cellar: state.cellar, drunk: state.drunk });
+  Object.assign(state, {
+    cellar: res.cellar || [], consumed: res.consumed || [], owner: !!res.owner, loaded: true,
+    lists: res.lists || state.lists, settings: res.settings || state.settings,
+  });
+  if (!isDemo) saved.set(SNAPSHOT, { cellar: state.cellar, consumed: state.consumed, lists: state.lists, settings: state.settings });
   render();
   return res;
 }
@@ -62,22 +72,22 @@ function logOut() {
   saved.del(KEY);
   saved.del(SNAPSHOT);
   state.cellar = state.cellar.filter(w => !w.hidden);
-  state.drunk = state.drunk.filter(w => !w.hidden);
+  state.consumed = state.consumed.filter(w => !w.hidden);
   render();
 }
 
 const findWine = id => {
   const c = state.cellar.find(w => w.id === id);
   if (c) return { wine: c, source: "cellar" };
-  const d = state.drunk.find(w => w.id === id);
-  return d ? { wine: d, source: "drunk" } : null;
+  const d = state.consumed.find(w => w.id === id);
+  return d ? { wine: d, source: "consumed" } : null;
 };
 
 /* ---------- Render ---------- */
 
 function render() {
   $("#stats").innerHTML = statsHTML(state);
-  $("#timeline").innerHTML = timelineHTML(state.cellar);
+  $("#timeline").innerHTML = timelineHTML(state.cellar, new Date(), state.lists);
   $("#list").innerHTML = !state.loaded && !state.cellar.length
     ? `<p class="empty">Opening the cellar…</p>`
     : listHTML(state);
@@ -85,8 +95,21 @@ function render() {
   $("#owner-link").textContent = state.owner ? "Log out" : "Owner login";
   $("#owner-state").textContent = state.owner ? "Logged in. Bottles tagged Hidden are only visible to you." : "";
   document.querySelectorAll(".chip").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.filter === state.filter)));
-  const producers = [...new Set([...state.cellar, ...state.drunk].map(w => w.producer).filter(Boolean))].sort();
-  $("#producers").innerHTML = producers.map(p => `<option value="${p.replace(/"/g, "&quot;")}"></option>`).join("");
+  // Typing suggestions: the sheet's lists first, then anything already used on your bottles.
+  const all = [...state.cellar, ...state.consumed];
+  const options = (listed, field) => [...new Set([...listed, ...all.map(w => w[field]).filter(Boolean).sort()])]
+    .map(v => `<option value="${esc(v)}"></option>`).join("");
+  $("#producers").innerHTML = options([], "producer");
+  $("#grapes").innerHTML = options(state.lists.grapes, "grape");
+  $("#places").innerHTML = options(state.lists.storage, "storage");
+}
+
+// The Colour dropdown: the Lists tab's colours, plus the bottle's own colour if it isn't one of them
+// (so editing an older bottle never quietly clears it).
+function fillColours(current) {
+  const names = state.lists.colours.map(c => c.name);
+  if (current && !names.includes(current)) names.push(current);
+  $("#f-colour").innerHTML = `<option value="">Not set</option>` + names.map(n => `<option>${esc(n)}</option>`).join("");
 }
 
 let toastTimer;
@@ -148,10 +171,11 @@ function openEditor(found) {
   editing = found;
   const form = $("#ed-form");
   const source = found ? found.source : "cellar";
+  fillColours(found && found.wine.colour);
   form.reset();
   $(".form-error", form).textContent = "";
   form.querySelectorAll("[data-for]").forEach(el => { el.hidden = el.dataset.for !== source; });
-  $("#ed-title").textContent = !found ? "Add a bottle" : source === "drunk" ? "Edit tasting" : "Edit bottle";
+  $("#ed-title").textContent = !found ? "Add a bottle" : source === "consumed" ? "Edit tasting" : "Edit bottle";
   $("#ed-bottles-label").textContent = found ? "Bottles" : "How many";
   if (found) fillFields(form, found.wine);
   else fillFields(form, { purchased: todayISO(), status: "In cellar", bottles: 1 });
@@ -191,7 +215,7 @@ $("#ed-delete").addEventListener("click", e => {
   submitFrom($("#editor"), b, () => run("remove", { id: editing.wine.id }), "Deleted");
 });
 
-/* ---------- Drank one ---------- */
+/* ---------- Opened one ---------- */
 
 let drinking = null;
 
@@ -205,7 +229,7 @@ function openDrinker(wine) {
   $("#dr-count-row").hidden = n < 2;
   form.elements.count.max = n;
   form.elements.count.value = 1;
-  form.elements.drunkOn.value = todayISO();
+  form.elements.consumedOn.value = todayISO();
   form.elements.notes.value = wine.notes || "";
   $("#drinker").showModal();
 }
@@ -214,7 +238,35 @@ $("#dr-form").addEventListener("submit", e => {
   e.preventDefault();
   const drink = readFields(e.currentTarget);
   submitFrom($("#drinker"), $("#dr-save"), () => run("drink", { id: drinking.id, drink }), res =>
-    res.result.left ? `Cheers. ${res.result.left} left in the cellar.` : "Cheers. Moved to Drunk.");
+    res.result.left ? `Cheers. ${res.result.left} left in the cellar.` : "Cheers. Moved to Consumed.");
+});
+
+/* ---------- Tasting card ---------- */
+
+let viewing = null;
+
+function openTasting(wine) {
+  viewing = wine;
+  $("#ts-body").innerHTML = tastingHTML(wine, state.settings.currency || "", state.lists);
+  $("#ts-edit").hidden = !state.owner;
+  $("#tasting").showModal();
+}
+
+$("#ts-edit").addEventListener("click", () => {
+  $("#tasting").close();
+  openEditor({ wine: viewing, source: "consumed" });
+});
+
+/* ---------- Print ---------- */
+
+// Prints the bottles in the cellar as a clean list (css/cellar.css has the print styles),
+// then puts the filter and search back as they were.
+$("#print-link").addEventListener("click", () => {
+  const before = { filter: state.filter, q: state.q };
+  Object.assign(state, { filter: "In cellar", q: "" });
+  render();
+  window.addEventListener("afterprint", () => { Object.assign(state, before); render(); }, { once: true });
+  window.print();
 });
 
 /* ---------- Login ---------- */
@@ -254,11 +306,18 @@ $("#add").addEventListener("click", () => openEditor(null));
 
 $("#list").addEventListener("click", async e => {
   const button = e.target.closest("[data-act]");
-  if (!button) return;
+  if (!button) {
+    // Tapping anywhere on a consumed bottle opens its tasting card.
+    const entry = e.target.closest(".entry.consumed");
+    const hit = entry && findWine(entry.dataset.id);
+    if (hit) openTasting(hit.wine);
+    return;
+  }
   const found = findWine(button.dataset.id);
   if (!found) return;
   const { wine } = found;
   const act = button.dataset.act;
+  if (act === "view") return openTasting(wine);
   if (act === "edit") return openEditor(found);
   if (act === "drink") return openDrinker(wine);
 

@@ -1,13 +1,34 @@
 // Turns state into HTML strings. Pure: no DOM access, no network. Everything user-typed goes through esc().
+//
+// Colours (and their order and tone) and the currency come from the Lists and Settings tabs in
+// the sheet, sent with every response as state.lists and state.settings.
 import { config } from "./config.js";
 import { esc, money, formatDate, bottleCount, fold, parseWindow, windowState } from "./format.js";
 
-const COLOUR_ORDER = { Sparkling: 0, White: 1, "Rosé": 2, Red: 3, Sweet: 4, Fortified: 5 };
+// Only used before the first response arrives (and in tests). The sheet's Lists tab is the real list.
+export const FALLBACK_LISTS = {
+  colours: [
+    { name: "Sparkling", tone: "white" }, { name: "White", tone: "white" }, { name: "Rosé", tone: "rose" },
+    { name: "Red", tone: "red" }, { name: "Sweet", tone: "white" }, { name: "Fortified", tone: "red" },
+  ],
+  grapes: [],
+  storage: [],
+};
+
+const listsOf = state => (state && state.lists) || FALLBACK_LISTS;
+const currencyOf = state => (state && state.settings && state.settings.currency) || "";
+
+/** "red", "white" or "rose": picks the colour of a bottle's dot, timeline bar and year. */
+export function toneOf(colour, lists = FALLBACK_LISTS) {
+  const key = fold(String(colour || "").trim());
+  const match = lists.colours.find(c => fold(c.name) === key);
+  return match ? match.tone : "red";
+}
 
 export const SECTIONS = [
   { status: "In cellar", title: "In the cellar", source: "cellar" },
   { status: "To collect", title: "To collect", source: "cellar" },
-  { status: "Drunk", title: "Drunk", source: "drunk" },
+  { status: "Consumed", title: "Consumed", source: "consumed" },
 ];
 
 export function titleHTML(name = config.cellarName) {
@@ -16,7 +37,8 @@ export function titleHTML(name = config.cellarName) {
   return `${esc(words.join(" "))} <em>${esc(last)}</em>`;
 }
 
-export function statsHTML({ cellar, drunk }) {
+export function statsHTML(state) {
+  const { cellar, consumed } = state;
   const sum = list => list.reduce((n, w) => n + bottleCount(w), 0);
   const inCellar = sum(cellar.filter(w => w.status === "In cellar"));
   const toCollect = sum(cellar.filter(w => w.status === "To collect"));
@@ -24,13 +46,13 @@ export function statsHTML({ cellar, drunk }) {
   return [
     `<span><b>${inCellar}</b> in the cellar</span>`,
     toCollect ? `<span><b>${toCollect}</b> to collect</span>` : "",
-    `<span><b>${drunk.length}</b> drunk</span>`,
-    `<span><b>${esc(config.currency)}${money(value)}</b> on the shelf</span>`,
+    `<span><b>${consumed.length}</b> consumed</span>`,
+    `<span><b>${esc(currencyOf(state))}${money(value)}</b> on the shelf</span>`,
   ].join("");
 }
 
 /** "When to open": each cellar bottle's drinking window on a shared year axis, with a line for today. */
-export function timelineHTML(cellar, now = new Date()) {
+export function timelineHTML(cellar, now = new Date(), lists = FALLBACK_LISTS) {
   const rows = cellar
     .map(w => ({ w, win: parseWindow(w.window) }))
     .filter(r => r.win)
@@ -51,13 +73,13 @@ export function timelineHTML(cellar, now = new Date()) {
 
   const lines = rows.map(({ w, win }) => {
     const state = windowState(w.window, year);
-    const colour = esc(String(w.colour || "").toLowerCase());
+    const tone = toneOf(w.colour, lists);
     const label = `${w.vintage || "NV"} ${w.producer}`;
     const tip = `${label} ${w.wine}: drink ${w.window}`;
     return `<div class="tl-row" title="${esc(tip)}">
-      <span class="tl-label"><b data-c="${colour}">${esc(w.vintage || "NV")}</b> ${esc(w.producer)}</span>
+      <span class="tl-label"><b data-tone="${tone}">${esc(w.vintage || "NV")}</b> ${esc(w.producer)}</span>
       <span class="tl-track">${grid}${nowLine}
-        <i class="tl-bar ${state.key}" data-c="${colour}"
+        <i class="tl-bar ${state.key}" data-tone="${tone}"
            style="left:${x(win.from)};right:calc(100% - ${x(win.to + 1)})"></i>
       </span></div>`;
   }).join("");
@@ -71,45 +93,122 @@ export function timelineHTML(cellar, now = new Date()) {
     <p class="tl-key"><span><i class="key now"></i>Drink now</span><span><i class="key hold"></i>Not ready</span><span><i class="key late"></i>Past its window</span></p>`;
 }
 
-function sortFor(status) {
-  if (status === "Drunk") return (a, b) => String(b.drunkOn || "").localeCompare(String(a.drunkOn || ""));
-  return (a, b) => (COLOUR_ORDER[a.colour] ?? 9) - (COLOUR_ORDER[b.colour] ?? 9)
+// Cellar sections sort by colour (in the Lists tab's order), then producer, then vintage.
+function sortFor(status, lists) {
+  if (status === "Consumed") return (a, b) => String(b.consumedOn || "").localeCompare(String(a.consumedOn || ""));
+  const order = new Map(lists.colours.map((c, i) => [c.name, i]));
+  const rank = w => (order.has(w.colour) ? order.get(w.colour) : 99);
+  return (a, b) => rank(a) - rank(b)
     || String(a.producer).localeCompare(String(b.producer))
     || (a.vintage || 0) - (b.vintage || 0);
 }
 
 export function listHTML(state) {
+  const lists = listsOf(state);
+  const currency = currencyOf(state);
   const q = fold(state.q.trim());
   const matches = w => !q || fold([w.producer, w.wine, w.grape, w.vintage, w.colour, w.notes].join(" ")).includes(q);
   const sections = SECTIONS.filter(s => state.filter === "All" || state.filter === s.status);
   let html = "";
   for (const s of sections) {
-    const items = state[s.source].filter(w => (s.source === "drunk" || w.status === s.status) && matches(w)).sort(sortFor(s.status));
+    const items = state[s.source].filter(w => (s.source === "consumed" || w.status === s.status) && matches(w)).sort(sortFor(s.status, lists));
     if (state.filter === "All" && !items.length && (q || s.status !== "In cellar")) continue;
     const n = items.reduce((a, w) => a + bottleCount(w), 0);
     html += `<section class="group"><h2 class="section-title">${s.title}<span class="count">${n} bottle${n === 1 ? "" : "s"}</span></h2>`;
+    if (s.status === "Consumed" && !q) html += historyHTML(state.consumed, new Date(), currency);
     html += items.length
-      ? `<ol class="list">${items.map(w => entryHTML(w, s.source, state.owner)).join("")}</ol>`
+      ? `<ol class="list">${items.map(w => entryHTML(w, s.source, state.owner, lists)).join("")}</ol>`
       : `<p class="empty">${q ? "Nothing matches your search." : "Nothing here yet."}</p>`;
     html += "</section>";
   }
   return html || `<p class="empty">Nothing matches your search.</p>`;
 }
 
-function entryHTML(w, source, owner) {
-  const colour = String(w.colour || "").toLowerCase();
+const hasRating = w => w.rating !== null && w.rating !== undefined && w.rating !== "";
+
+/** Summary above the Consumed list: totals, the last 12 months, best bottle, favourites. */
+export function historyHTML(consumed, now = new Date(), currency = "") {
+  if (!consumed.length) return "";
+  const year = String(now.getFullYear());
+  const thisYear = consumed.filter(w => String(w.consumedOn || "").startsWith(year)).length;
+  const rated = consumed.filter(hasRating);
+  const avg = rated.length ? rated.reduce((n, w) => n + Number(w.rating), 0) / rated.length : null;
+  const spent = consumed.reduce((n, w) => n + (Number(w.price) || 0), 0);
+
+  const months = [];
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    months.push({
+      key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
+      short: d.toLocaleDateString(config.locale, { month: "narrow" }),
+      long: d.toLocaleDateString(config.locale, { month: "long", year: "numeric" }),
+      n: 0,
+    });
+  }
+  for (const w of consumed) {
+    const m = months.find(x => String(w.consumedOn || "").startsWith(x.key));
+    if (m) m.n++;
+  }
+  const most = Math.max(1, ...months.map(m => m.n));
+  const bars = months.map(m => `<span class="month" title="${esc(m.long)}: ${m.n} bottle${m.n === 1 ? "" : "s"}">
+      <span class="bar"><i class="${m.n ? "" : "zero"}" style="height:${m.n ? Math.max(8, (m.n / most) * 100) : 3}%"></i></span>
+      <small>${esc(m.short)}</small></span>`).join("");
+
+  const best = rated.slice().sort((a, b) => Number(b.rating) - Number(a.rating)
+    || String(b.consumedOn || "").localeCompare(String(a.consumedOn || "")))[0];
+  const top = field => {
+    const counts = new Map();
+    for (const w of consumed) if (w[field]) counts.set(w[field], (counts.get(w[field]) || 0) + 1);
+    return [...counts].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]))).slice(0, 3)
+      .map(([name, n]) => `${esc(name)} <small>${n}</small>`).join(" · ");
+  };
+  const facts = [
+    best ? ["Best bottle", `<button type="button" class="linkbtn" data-act="view" data-id="${esc(best.id)}">${esc(best.vintage || "NV")} ${esc(best.producer)} ${esc(best.wine)}</button> <small>${esc(best.rating)}/10</small>`] : null,
+    ["Top producers", top("producer")],
+    ["Top grapes", top("grape")],
+  ].filter(f => f && f[1]);
+
+  return `<div class="history">
+    <div class="stats">
+      <span><b>${consumed.length}</b> consumed</span>
+      <span><b>${thisYear}</b> this year</span>
+      ${avg === null ? "" : `<span><b>${avg.toFixed(1)}</b> average rating</span>`}
+      <span><b>${esc(currency)}${money(spent)}</b> spent</span>
+    </div>
+    <div class="months" role="img" aria-label="Bottles consumed per month, last 12 months">${bars}</div>
+    ${facts.length ? `<dl class="history-facts">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>` : ""}
+  </div>`;
+}
+
+/** The tasting card for a consumed bottle: everything about it, notes in full. */
+export function tastingHTML(w, currency = "", lists = FALLBACK_LISTS) {
+  const facts = [
+    ["Consumed", w.consumedOn ? formatDate(w.consumedOn) : ""],
+    ["Bought", w.purchased ? formatDate(w.purchased) : ""],
+    ["Price", w.price !== null && w.price !== undefined && w.price !== "" ? `${currency}${money(w.price)}` : ""],
+    ["Grape", [w.grape, w.colour].filter(Boolean).join(" · ")],
+  ].filter(f => f[1]);
+  return `<p class="eyebrow">Tasting card</p>
+    <h3 id="ts-title"><span class="ts-vin" data-tone="${toneOf(w.colour, lists)}">${esc(w.vintage || "NV")}</span> ${esc(w.producer)}<br><em>${esc(w.wine)}</em></h3>
+    <p class="ts-rating">${hasRating(w) ? `${esc(w.rating)}<small>/10</small>` : `<small>Not rated</small>`}</p>
+    ${facts.length ? `<dl class="ts-facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>` : ""}
+    ${w.notes ? `<p class="ts-notes">${esc(w.notes)}</p>` : `<p class="empty">No tasting notes.</p>`}`;
+}
+
+function entryHTML(w, source, owner, lists) {
+  const tone = toneOf(w.colour, lists);
   const meta = [];
   const kind = [w.grape, w.colour].filter(Boolean).join(" · ");
-  if (kind) meta.push(`<span><i class="swatch" data-c="${esc(colour)}"></i>${esc(kind)}</span>`);
+  if (kind) meta.push(`<span><i class="swatch" data-tone="${tone}"></i>${esc(kind)}</span>`);
 
-  if (source === "drunk") {
-    if (w.drunkOn) meta.push(`<span>Drunk ${esc(formatDate(w.drunkOn))}</span>`);
-    if (w.rating !== null && w.rating !== undefined) meta.push(`<span class="rating">${esc(w.rating)}<small>/10</small></span>`);
+  if (source === "consumed") {
+    if (w.consumedOn) meta.push(`<span>Consumed ${esc(formatDate(w.consumedOn))}</span>`);
+    if (hasRating(w)) meta.push(`<span class="rating">${esc(w.rating)}<small>/10</small></span>`);
   } else {
     if (w.window) meta.push(`<span>Drink ${esc(w.window)}</span>`);
     const ws = windowState(w.window);
     if (ws) meta.push(`<span class="pill ${ws.key}">${ws.label}</span>`);
-    if (w.storage && w.storage !== "-") meta.push(`<span>${esc(w.storage)}</span>`);
+    if (w.storage) meta.push(`<span>${esc(w.storage)}</span>`);
     if (w.status === "To collect" && w.collectBy) meta.push(`<span>Collect by ${esc(formatDate(w.collectBy))}</span>`);
   }
   if (owner && w.hidden) meta.push(`<span class="pill hidden">Hidden</span>`);
@@ -120,15 +219,22 @@ function entryHTML(w, source, owner) {
       <button class="btn" type="button" data-act="edit" data-id="${id}">Edit</button>
       ${source === "cellar" ? `<button class="btn" type="button" data-act="more" data-id="${id}">+1 bottle</button>` : ""}
       ${source === "cellar" && w.status === "To collect" ? `<button class="btn" type="button" data-act="collected" data-id="${id}">Collected</button>` : ""}
-      ${source === "cellar" ? `<button class="btn" type="button" data-act="drink" data-id="${id}">Drank one</button>` : ""}
+      ${source === "cellar" ? `<button class="btn" type="button" data-act="drink" data-id="${id}">Opened one</button>` : ""}
     </div>`;
 
-  return `<li class="entry" data-id="${id}">
-    <div class="vin${w.vintage ? "" : " nv"}" data-c="${esc(colour)}">${w.vintage ? esc(w.vintage) : "NV"}</div>
+  // Consumed bottles open their tasting card: the title is a button for keyboards, and app.js
+  // also opens it when the rest of the entry is tapped.
+  const titleInner = `<span class="producer">${esc(w.producer)}</span> <span class="cuvee">${esc(w.wine)}</span>${
+    n > 1 ? ` <span class="qty" title="${n} bottles">×${n}</span>` : ""}`;
+  const title = source === "consumed"
+    ? `<button type="button" class="title entry-open" data-act="view" data-id="${id}">${titleInner}</button>`
+    : `<span class="title">${titleInner}</span>`;
+
+  return `<li class="entry${source === "consumed" ? " consumed" : ""}" data-id="${id}">
+    <div class="vin${w.vintage ? "" : " nv"}" data-tone="${tone}">${w.vintage ? esc(w.vintage) : "NV"}</div>
     <div class="body">
       <div class="line">
-        <span class="title"><span class="producer">${esc(w.producer)}</span> <span class="cuvee">${esc(w.wine)}</span>${
-          n > 1 ? ` <span class="qty" title="${n} bottles">×${n}</span>` : ""}</span>
+        ${title}
         <span class="dots" aria-hidden="true"></span>
         <span class="price">${w.price !== null && w.price !== undefined ? money(w.price) : "—"}</span>
       </div>

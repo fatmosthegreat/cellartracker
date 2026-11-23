@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { createFakeGas, loadBackend, sha256Bytes } = require('../dev/fake-gas.js');
+const { createFakeGas, loadBackend, sha256Bytes, SAMPLE_BOTTLES } = require('../dev/fake-gas.js');
 
 const CODE = fs.readFileSync(path.join(__dirname, '../apps-script/Code.gs'), 'utf8');
 const PASSKEY = 'test-passkey';
@@ -12,7 +12,7 @@ const PASSKEY = 'test-passkey';
 function freshCellar() {
   const gas = createFakeGas();
   const backend = loadBackend(gas, CODE);
-  backend.setup();
+  backend.setup(SAMPLE_BOTTLES);
   const salt = 'salt';
   gas.PropertiesService.getScriptProperties().setProperties({ PASS_SALT: salt, PASS_HASH: backend.sha256_(salt + PASSKEY) });
   const as = key => (action, extra) => backend.handle_(Object.assign({ action, key }, extra));
@@ -39,10 +39,23 @@ test('setup creates Cellar and Drunk with your bottles, and refuses to run twice
   const { ok, backend, gas } = freshCellar();
   const res = ok('list');
   assert.equal(res.cellar.length, 5);
-  assert.equal(res.drunk.length, 1);
-  assert.equal(res.drunk[0].producer, 'Penfolds');
+  assert.equal(res.consumed.length, 1);
+  assert.equal(res.consumed[0].producer, 'Penfolds');
   assert.equal(gas._spreadsheet.getSheetByName('Sheet1'), null, 'blank Sheet1 is removed');
-  assert.throws(() => backend.setup(), /already have bottles/);
+  assert.throws(() => backend.setup(SAMPLE_BOTTLES), /already have bottles/);
+  backend.setup();  // as run from the editor: safe again, adds nothing
+  assert.equal(ok('list').cellar.length, 5);
+});
+
+test('setup on a new sheet creates empty tabs, with no sample bottles', () => {
+  const gas = createFakeGas();
+  const backend = loadBackend(gas, CODE);
+  backend.setup();
+  const res = backend.handle_({ action: 'list' });
+  assert.equal(res.ok, true);
+  assert.deepEqual([res.cellar.length, res.consumed.length], [0, 0]);
+  assert.ok(gas._spreadsheet.getSheetByName('Lists') && gas._spreadsheet.getSheetByName('Settings'));
+  assert.doesNotMatch(CODE, /Leflaive|Coudray-Bizot|A F Gros|STARTER_BOTTLES/, 'no sample bottles left in Code.gs');
 });
 
 test('numbers, flags and accents survive the round trip', () => {
@@ -60,12 +73,12 @@ test('friends only see bottles that are not hidden, in both tabs', () => {
   const { ok, friend } = freshCellar();
   const before = ok('list');
   ok('update', { id: before.cellar[0].id, wine: { hidden: true } });
-  ok('update', { id: before.drunk[0].id, wine: { hidden: true } });
+  ok('update', { id: before.consumed[0].id, wine: { hidden: true } });
   const pub = friend('list');
   assert.equal(pub.ok, true);
   assert.equal(pub.owner, false);
   assert.equal(pub.cellar.length, 4);
-  assert.equal(pub.drunk.length, 0);
+  assert.equal(pub.consumed.length, 0);
   assert.ok(pub.cellar.every(w => !w.hidden));
   assert.equal(ok('list').cellar.length, 5, 'the owner still sees everything');
 });
@@ -124,12 +137,12 @@ test('a non-vintage wine is kept apart from vintage ones', () => {
 test('drinking one of several bottles leaves the rest in the cellar', () => {
   const { ok, byName } = freshCellar();
   const jadot = byName(ok('create', { wine: { producer: 'Jadot', wine: 'Gevrey-Chambertin', vintage: 2018 } }).cellar, 'Jadot')[0];
-  const res = ok('drink', { id: jadot.id, drink: { drunkOn: '2026-12-01', rating: 8.5, notes: 'Opened up after an hour' } });
+  const res = ok('drink', { id: jadot.id, drink: { consumedOn: '2026-12-01', rating: 8.5, notes: 'Opened up after an hour' } });
   assert.equal(res.result.left, 1);
   assert.equal(byName(res.cellar, 'Jadot')[0].bottles, 1);
-  const drunk = byName(res.drunk, 'Jadot');
+  const drunk = byName(res.consumed, 'Jadot');
   assert.equal(drunk.length, 1);
-  assert.equal(drunk[0].drunkOn, '2026-12-01');
+  assert.equal(drunk[0].consumedOn, '2026-12-01');
   assert.equal(drunk[0].rating, 8.5);
   assert.equal(drunk[0].notes, 'Opened up after an hour');
   assert.equal(drunk[0].price, 140, 'price paid carries over');
@@ -142,9 +155,9 @@ test('drinking the last bottle removes the wine from the Cellar tab entirely', (
   const res = ok('drink', { id: leflaive.id, drink: {} });
   assert.equal(res.result.left, 0);
   assert.equal(byName(res.cellar, 'Leflaive').length, 0);
-  assert.equal(byName(res.drunk, 'Leflaive').length, 1);
+  assert.equal(byName(res.consumed, 'Leflaive').length, 1);
   assert.equal(tab('Cellar').getLastRow(), 1 + 4, 'the row is gone from the sheet, not just hidden');
-  assert.match(byName(res.drunk, 'Leflaive')[0].drunkOn, /^\d{4}-\d{2}-\d{2}$/, 'defaults to today');
+  assert.match(byName(res.consumed, 'Leflaive')[0].consumedOn, /^\d{4}-\d{2}-\d{2}$/, 'defaults to today');
 });
 
 test('drinking several bottles at once writes one Drunk row per bottle', () => {
@@ -152,7 +165,7 @@ test('drinking several bottles at once writes one Drunk row per bottle', () => {
   const res1 = ok('create', { wine: { producer: 'Duroche', wine: 'Vosne-Romanée', vintage: 2018, bottles: 2 } });
   const id = byName(res1.cellar, 'Duroche')[0].id;
   const res = ok('drink', { id, drink: { count: 3 } });
-  assert.equal(byName(res.drunk, 'Duroche').length, 3);
+  assert.equal(byName(res.consumed, 'Duroche').length, 3);
   assert.equal(byName(res.cellar, 'Duroche').length, 0);
 });
 
@@ -161,7 +174,7 @@ test("you can't drink more bottles than you have, or drink from the Drunk tab", 
   const list = ok('list');
   const tooMany = owner('drink', { id: list.cellar[0].id, drink: { count: 2 } });
   assert.match(tooMany.error, /only 1 bottle/);
-  const twice = owner('drink', { id: list.drunk[0].id, drink: {} });
+  const twice = owner('drink', { id: list.consumed[0].id, drink: {} });
   assert.match(twice.error, /no longer in the cellar/);
   assert.equal(ok('list').cellar.length, 5, 'nothing moved');
 });
@@ -192,7 +205,7 @@ test('bad values are rejected with a readable message and change nothing', () =>
     assert.match(res.error, msg);
   }
   assert.match(owner('create', { wine: { wine: 'No producer' } }).error, /Producer can't be blank/);
-  assert.match(owner('update', { id: ok('list').drunk[0].id, wine: { rating: 11 } }).error, /Rating must be/);
+  assert.match(owner('update', { id: ok('list').consumed[0].id, wine: { rating: 11 } }).error, /Rating must be/);
   assert.equal(ok('list').cellar[0].vintage, 2022, 'nothing was written');
 });
 
@@ -256,9 +269,9 @@ test('removing a bottle works from either tab', () => {
   const { ok } = freshCellar();
   const list = ok('list');
   ok('remove', { id: list.cellar[0].id });
-  const res = ok('remove', { id: list.drunk[0].id });
+  const res = ok('remove', { id: list.consumed[0].id });
   assert.equal(res.cellar.length, 4);
-  assert.equal(res.drunk.length, 0);
+  assert.equal(res.consumed.length, 0);
 });
 
 test('the web endpoints return JSON', () => {
@@ -275,20 +288,18 @@ test('the web endpoints return JSON', () => {
 /* ============================== Telegram bot ============================== */
 
 const CHAT = '4242';
-const SECRET = 'webhook-secret';
 
 // A cellar with the bot set up. `say` sends a chat message, `tap` presses a button.
+// Each goes through pollTelegram, the way real messages arrive.
 function freshBot() {
   const c = freshCellar();
-  c.gas.PropertiesService.getScriptProperties().setProperties({
-    TELEGRAM_TOKEN: '123:abc', TELEGRAM_URL: 'https://script.google.com/macros/s/x/exec',
-    TELEGRAM_SECRET: SECRET, TELEGRAM_CHAT_ID: CHAT,
-  });
+  c.gas.PropertiesService.getScriptProperties().setProperties({ TELEGRAM_TOKEN: '123:abc', TELEGRAM_CHAT_ID: CHAT });
   let updateId = 100;
-  const post = (update, secret = SECRET) => {
+  const post = update => {
+    c.gas._replies.getUpdates = p => ({ ok: true, result: update.update_id >= p.offset ? [update] : [] });
     c.gas._fetches.length = 0;
-    c.backend.doPost({ parameter: { tg: secret }, postData: { contents: JSON.stringify(update) } });
-    return c.gas._fetches.slice();
+    c.backend.pollTelegram();
+    return c.gas._fetches.filter(f => f.method !== 'getUpdates');
   };
   const say = (text, chat = CHAT) => post({ update_id: ++updateId, message: { message_id: 1, chat: { id: Number(chat) }, text } });
   const tap = data => post({ update_id: ++updateId, callback_query: { id: 'cb', data, message: { message_id: 7, chat: { id: Number(CHAT) } } } });
@@ -297,20 +308,23 @@ function freshBot() {
   return Object.assign(c, { post, say, tap, sent, buttons });
 }
 
-test('the bot ignores a wrong secret, another chat, and repeated updates', () => {
-  const { post, say, ok } = freshBot();
-  assert.equal(post({ update_id: 1, message: { chat: { id: Number(CHAT) }, text: '/cellar' } }, 'wrong').length, 0);
+test('the bot ignores other chats and never answers an update twice', () => {
+  const { post, say, ok, backend } = freshBot();
   assert.equal(say('/cellar', '999').length, 0);
   const update = { update_id: 500, message: { chat: { id: Number(CHAT) }, text: '/cellar' } };
   assert.ok(post(update).length > 0);
-  assert.equal(post(update).length, 0, 'a Telegram retry is not answered twice');
+  assert.equal(backend.handleTelegram_(update), false, 'the same update again is ignored');
   assert.equal(ok('list').cellar.length, 5);
 });
 
-test('the web page still works alongside the bot', () => {
-  const { backend } = freshBot();
-  const res = JSON.parse(backend.doPost({ parameter: {}, postData: { contents: '{"action":"list"}' } }).getContent());
+test('page requests get the lists, settings and build with every response', () => {
+  const { backend, gas } = freshBot();
+  const res = JSON.parse(backend.doPost({ postData: { contents: '{"action":"list"}' } }).getContent());
   assert.equal(res.ok, true);
+  assert.equal(res.build, backend.BUILD);
+  assert.deepEqual(res.lists.colours[0], { name: 'Sparkling', tone: 'white' });
+  assert.equal(res.settings.currency, 'S$');
+  assert.equal(gas._fetches.length, 0, 'no Telegram calls');
 });
 
 test('/cellar lists every bottle by status, and plain text searches ignoring accents', () => {
@@ -330,9 +344,10 @@ test('/cellar lists every bottle by status, and plain text searches ignoring acc
 
 test('/stats, /collect and /help answer', () => {
   const { say, sent } = freshBot();
-  assert.match(sent(say('/stats')), /<b>4<\/b> in the cellar\n<b>1<\/b> to collect\n<b>1<\/b> drunk\n<b>S\$809<\/b> on the shelf/);
+  assert.match(sent(say('/stats')), /<b>4<\/b> in the cellar\n<b>1<\/b> to collect\n<b>1<\/b> consumed\n<b>S\$809<\/b> on the shelf/);
   assert.match(sent(say('/collect')), /A F Gros[\s\S]*Grand Cru, collect Fri 27 Nov/);
-  assert.match(sent(say('/help')), /\/drank/);
+  assert.match(sent(say('/help')), /\/opened/);
+  assert.doesNotMatch(sent(say('/help')), /\/drank/, 'the old name works but is not advertised');
 });
 
 test('a long /cellar is split into messages under the Telegram limit', () => {
@@ -353,10 +368,10 @@ test('/drank shows buttons, and tapping one drinks it exactly like the website',
   assert.match(btns[0].text, /2018 Duroche Vosne-Romanée/);
   const done = tap(btns[0].callback_data);
   assert.ok(done.some(f => f.method === 'answerCallbackQuery'));
-  assert.match(sent(done), /Drank .*Duroche[\s\S]*That was the last one/);
+  assert.match(sent(done), /Opened .*Duroche[\s\S]*That was the last one/);
   const res = ok('list');
   assert.equal(byName(res.cellar, 'Duroche').length, 0);
-  assert.equal(byName(res.drunk, 'Duroche').length, 1);
+  assert.equal(byName(res.consumed, 'Duroche').length, 1);
   assert.match(sent(tap(btns[0].callback_data)), /no longer in the cellar/, 'a second tap is refused');
   assert.match(sent(say('/drank nothing-like-this')), /Nothing matches/);
 });
@@ -365,7 +380,7 @@ test('a failed tap acknowledgement still replaces the buttons, so a bottle is ne
   const { say, tap, sent, buttons, gas } = freshBot();
   const btn = buttons(say('/drank jadot'))[0];
   gas._replies.answerCallbackQuery = () => ({ ok: false, description: 'query is too old' });
-  assert.match(sent(tap(btn.callback_data)), /Drank .*Jadot/);
+  assert.match(sent(tap(btn.callback_data)), /Opened .*Jadot/);
 });
 
 test('/collected and /add1 change status and count', () => {
@@ -378,13 +393,14 @@ test('/collected and /add1 change status and count', () => {
   assert.equal(byName(ok('list').cellar, 'Jadot')[0].bottles, 2);
 });
 
-test('installTelegram sets the webhook with the secret and one daily reminder timer', () => {
+test('installTelegram turns off any webhook and sets one poll timer and one daily reminder timer', () => {
   const { backend, gas } = freshBot();
   backend.installTelegram();
   backend.installTelegram();  // running it twice doesn't double the timers
-  const hook = gas._fetches.find(f => f.method === 'setWebhook');
-  assert.equal(hook.payload.url, 'https://script.google.com/macros/s/x/exec?tg=' + SECRET);
-  assert.deepEqual(gas._triggers.map(t => [t.fn, t.schedule.atHour]), [['sendReminders', 9]]);
+  assert.deepEqual(gas._fetches.find(f => f.method === 'deleteWebhook').payload, { drop_pending_updates: true });
+  assert.ok(!gas._fetches.some(f => f.method === 'setWebhook'));
+  assert.deepEqual(gas._triggers.map(t => [t.fn, t.schedule]),
+    [['pollTelegram', { everyMinutes: 1 }], ['sendReminders', { everyHours: 1 }]]);
   backend.uninstallTelegram();
   assert.equal(gas._triggers.length, 0);
 });
@@ -398,11 +414,90 @@ test('polling answers new messages once and moves past ones from other chats', (
   const offsets = [];
   gas._replies.getUpdates = p => { offsets.push(p.offset); return { ok: true, result: queue.filter(u => u.update_id >= p.offset) }; };
   backend.pollTelegram();
-  assert.match(sent(gas._fetches), /\/drank/);
+  assert.match(sent(gas._fetches), /\/opened/);
   gas._fetches.length = 0;
   backend.pollTelegram();
   assert.deepEqual(offsets.slice(-1), [902], 'both updates are marked done');
   assert.equal(sent(gas._fetches), '', 'nothing is answered twice');
+});
+
+test('relayed updates are answered only with the relay secret', () => {
+  const { backend, gas, sent } = freshBot();
+  const relay = (update, relayKey) => {
+    gas._fetches.length = 0;
+    const res = JSON.parse(backend.doPost({ postData: { contents: JSON.stringify({ telegram: update, relayKey }) } }).getContent());
+    return { ok: res.ok, calls: gas._fetches.slice() };
+  };
+  const msg = id => ({ update_id: id, message: { message_id: 1, chat: { id: Number(CHAT) }, text: '/help' } });
+  assert.equal(relay(msg(1), 'anything').calls.length, 0, 'no relay secret set yet');
+  const secret = backend.relaySecret();
+  assert.equal(backend.relaySecret(), secret, 'running it again shows the same secret');
+  assert.equal(relay(msg(2), 'wrong').calls.length, 0);
+  const good = relay(msg(3), secret);
+  assert.equal(good.ok, true);
+  assert.match(sent(good.calls), /\/opened/);
+  assert.equal(relay(msg(3), secret).calls.length, 0, 'a repeat is ignored');
+});
+
+test('relayed updates that arrive out of order are both answered', () => {
+  const { backend, gas } = freshBot();
+  const secret = backend.relaySecret();
+  const relay = id => backend.doPost({ postData: { contents: JSON.stringify({ relayKey: secret,
+    telegram: { update_id: id, message: { message_id: id, chat: { id: Number(CHAT) }, text: '/stats' } } }) } });
+  relay(202);
+  relay(201);
+  assert.equal(gas._fetches.filter(f => f.method === 'sendMessage').length, 2);
+});
+
+test('installTelegramRelay points Telegram at the Worker with the secret and stops polling', () => {
+  const { backend, gas } = freshBot();
+  backend.installTelegram();
+  assert.throws(() => backend.installTelegramRelay_('https://cellar-relay.me.workers.dev'), /relaySecret\(\) first/);
+  const secret = backend.relaySecret();
+  assert.throws(() => backend.installTelegramRelay_('http://cellar-relay.me.workers.dev'), /https/);
+  gas.PropertiesService.getScriptProperties().setProperties({ TELEGRAM_URL: 'old', TELEGRAM_SECRET: 'old', TG_LAST_UPDATE: '5' });
+  gas._fetches.length = 0;
+  backend.installTelegramRelay_('https://cellar-relay.me.workers.dev');
+  const hook = gas._fetches.find(f => f.method === 'setWebhook').payload;
+  assert.equal(hook.url, 'https://cellar-relay.me.workers.dev');
+  assert.equal(hook.secret_token, secret);
+  assert.ok(/^[A-Za-z0-9_-]{1,256}$/.test(secret), 'Telegram accepts the secret format');
+  assert.deepEqual(gas._triggers.map(t => [t.fn, t.schedule]), [['sendReminders', { everyHours: 1 }]]);
+  const left = gas.PropertiesService.getScriptProperties().getKeys();
+  for (const k of ['TELEGRAM_URL', 'TELEGRAM_SECRET', 'TG_LAST_UPDATE']) assert.ok(!left.includes(k), k + ' is cleaned up');
+  backend.installTelegramRelay_('https://relay.example.com/telegram');  // any https address, e.g. a custom domain
+});
+
+test('the Cloudflare Worker checks the secret, answers at once, and passes the update on', async () => {
+  const { default: worker } = await import('../relay/worker.mjs');
+  const env = { RELAY_SECRET: 's3cret', APPS_SCRIPT_URL: 'https://script.google.com/macros/s/abc/exec' };
+  assert.equal((await worker.fetch(new Request('https://relay.test/'), { RELAY_SECRET: 's3cret' }, {})).status, 500,
+    'a missing APPS_SCRIPT_URL is reported, not silently ignored');
+  const forwarded = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => { forwarded.push({ url, body: JSON.parse(init.body) }); return new Response('{}'); };
+  try {
+    const waits = [];
+    const ctx = { waitUntil: p => waits.push(p) };
+    const post = (secret, body = '{"update_id":5}') => worker.fetch(new Request('https://relay.test/', {
+      method: 'POST', body, headers: secret ? { 'X-Telegram-Bot-Api-Secret-Token': secret } : {},
+    }), env, ctx);
+
+    assert.equal((await worker.fetch(new Request('https://relay.test/'), env, ctx)).status, 200, 'a browser visit just says it is running');
+    assert.equal((await post(null)).status, 403);
+    assert.equal((await post('wrong')).status, 403);
+    assert.equal((await post('s3cret', 'not json')).status, 400);
+    assert.equal(forwarded.length, 0);
+
+    const res = await post('s3cret');
+    assert.equal(res.status, 200);
+    await Promise.all(waits);
+    assert.equal(forwarded.length, 1);
+    assert.equal(forwarded[0].url, env.APPS_SCRIPT_URL);
+    assert.deepEqual(forwarded[0].body, { telegram: { update_id: 5 }, relayKey: 's3cret' });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test('findTelegramChatId saves the chat of the last message', () => {
@@ -462,7 +557,199 @@ test('Collect by is a date, and is not carried into Drunk', () => {
   ok('update', { id: w.id, wine: { collectBy: '2026-11-27' } });
   assert.equal(ok('list').cellar.find(x => x.id === w.id).collectBy, '2026-11-27');
   const res = ok('drink', { id: w.id });
-  assert.equal('collectBy' in res.drunk.at(-1), false);
-  const drunk = tab('Drunk');
+  assert.equal('collectBy' in res.consumed.at(-1), false);
+  const drunk = tab('Consumed');
   assert.ok(!drunk.getRange(1, 1, 1, drunk.getLastColumn()).getDisplayValues()[0].includes('collectBy'));
+});
+
+/* ============================== Lists and Settings tabs ============================== */
+
+const setSetting = (tab, key, value) => { tab('Settings').rows.find(r => r[0] === key)[1] = value; };
+
+test('migrate creates the Lists, Settings and Reminders log tabs, and never overwrites them', () => {
+  const { backend, tab, ok } = freshCellar();
+  assert.deepEqual(tab('Lists').rows[0], ['colour', 'colourTone', 'grape', 'storage']);
+  assert.deepEqual(tab('Lists').rows[1].slice(0, 3), ['Sparkling', 'white', 'Pinot Noir']);
+  assert.deepEqual(tab('Settings').rows.slice(1).map(r => r[0]), ['currency', 'reminderHour', 'closeReminderMonths', 'nudgeDay']);
+  assert.equal(tab('Reminders log').hidden, true, 'the log tab is hidden');
+
+  tab('Lists').rows.push(['Orange', 'white', '', '']);
+  setSetting(tab, 'currency', '€');
+  backend.migrate();
+  assert.deepEqual(tab('Lists').rows.at(-1).slice(0, 2), ['Orange', 'white'], 'your rows are kept');
+  const res = ok('list');
+  assert.equal(res.settings.currency, '€');
+  assert.deepEqual(res.lists.colours.at(-1), { name: 'Orange', tone: 'white' });
+});
+
+test('migrate renames an old "Drunk" tab and its drunkOn column to Consumed, keeping every row', () => {
+  const { backend, gas, ok } = freshCellar();
+  const jadot = ok('list').cellar.find(w => w.producer === 'Jadot');
+  ok('drink', { id: jadot.id, drink: { consumedOn: '2026-10-01', rating: 9 } });
+  const sheet = gas._spreadsheet.getSheetByName('Consumed');
+  sheet.setName('Drunk');  // make it look like an older sheet
+  const at = sheet.rows[0].indexOf('consumedOn');
+  sheet.rows[0][at] = 'drunkOn';
+  assert.match(backend.handle_({ action: 'list' }).error, /No "Consumed" tab/, 'new code on an old sheet needs migrate()');
+
+  backend.migrate();
+  assert.equal(gas._spreadsheet.getSheetByName('Drunk'), null);
+  assert.equal(gas._spreadsheet.getSheetByName('Consumed'), sheet, 'same tab, renamed');
+  assert.equal(sheet.rows[0][at], 'consumedOn', 'same column, renamed');
+  assert.equal(sheet.rows[0].filter(h => /On$/.test(h) && h !== 'consumedOn').length, 0, 'no extra column added');
+  const res = ok('list');
+  assert.equal(res.consumed.length, 2);
+  const opened = res.consumed.find(w => w.producer === 'Jadot');
+  assert.deepEqual([opened.consumedOn, opened.rating], ['2026-10-01', 9]);
+  backend.migrate();  // running it again changes nothing
+  assert.equal(ok('list').consumed.length, 2);
+});
+
+test('colour, grape and storage are saved in the Lists spelling; values not in a list are kept', () => {
+  const { ok, tab } = freshCellar();
+  tab('Lists').rows.push(['Orange', 'Rosé', '', "Friend's fridge"]);
+  const res = ok('create', { wine: { producer: 'Gravner', wine: 'Ribolla', colour: ' orange', grape: 'pinot  noir', storage: "FRIEND'S FRIDGE" } });
+  const w = res.cellar.find(x => x.producer === 'Gravner');
+  assert.deepEqual([w.colour, w.grape, w.storage], ['Orange', 'Pinot Noir', "Friend's fridge"]);
+  assert.equal(res.lists.colours.at(-1).tone, 'rose', '"Rosé" in the tone column means rose');
+  assert.deepEqual(res.lists.storage, ["Friend's fridge"]);
+  const other = ok('create', { wine: { producer: 'Radikon', wine: 'Jakot', colour: 'Amber', grape: 'Tocai Friulano' } })
+    .cellar.find(x => x.producer === 'Radikon');
+  assert.deepEqual([other.colour, other.grape], ['Amber', 'Tocai Friulano']);
+});
+
+test('prices accept any currency in front, and "-" storage reads as blank', () => {
+  const { ok } = freshCellar();
+  const price = p => ok('create', { wine: { producer: 'P' + p, wine: 'W', price: p } }).cellar.find(w => w.producer === 'P' + p).price;
+  assert.equal(price('€ 1,250'), 1250);
+  assert.equal(price('$45.50'), 45.5);
+  assert.equal(price('USD 80'), 80);
+  assert.equal(ok('list').cellar.find(w => w.producer === 'Jadot').storage, null, 'the sample bottles use "-"');
+});
+
+test('Settings drive the currency and reminder timing; bad values fall back and status() says so', () => {
+  const { backend, tab, ok, say, sent } = freshBot();
+  setSetting(tab, 'currency', '€');
+  setSetting(tab, 'closeReminderMonths', '3');
+  setSetting(tab, 'nudgeDay', 'tuesday');
+  setSetting(tab, 'reminderHour', '25');
+  const s = ok('list').settings;
+  assert.deepEqual(s, { currency: '€', reminderHour: 9, closeReminderMonths: 3, nudgeDay: 'Tuesday' });
+  assert.match(sent(say('/stats')), /€809/);
+
+  const keys = (recs, today) => backend.remindersDue_(recs, today, {}, s).map(r => r.key);
+  assert.deepEqual(keys([W()], '2033-09-30'), []);
+  assert.deepEqual(keys([W()], '2033-10-01'), ['w1|close|2033'], '3 months before the end of 2033');
+  const tc = W({ window: '', status: 'To collect' });
+  assert.deepEqual(keys([tc], '2026-11-23'), [], 'not Monday any more');
+  assert.deepEqual(keys([tc], '2026-11-24'), ['w1|nudge|2026-11-24'], 'Tuesday');
+  assert.deepEqual(backend.remindersDue_([W()], '2033-12-01', {}, { ...s, closeReminderMonths: 0 }).length, 0, '0 turns it off');
+  assert.match(backend.status().join('\n'), /reminderHour "25" isn't valid, so 9 is used/);
+});
+
+test('the hourly timer sends once a day, from the reminder hour', () => {
+  const { backend, gas, ok } = freshBot();
+  const gros = ok('list').cellar.find(w => w.producer === 'A F Gros');
+  ok('update', { id: gros.id, wine: { collectBy: '2026-11-27' } });
+  gas._fetches.length = 0;
+  assert.equal(backend.sendReminders_('2026-11-26', 8), 0, 'before 9am');
+  assert.equal(gas._fetches.length, 0);
+  assert.equal(backend.sendReminders_('2026-11-26', 9), 1);
+  assert.equal(backend.sendReminders_('2026-11-26', 10), 0, 'not again that day');
+  assert.equal(gas._fetches.filter(f => f.method === 'sendMessage').length, 1);
+});
+
+test('the reminder log is a sheet tab, so hundreds of bottles are fine; an old property is moved across', () => {
+  const { backend, gas, ok, tab } = freshBot();
+  const props = gas.PropertiesService.getScriptProperties();
+  const jadot = ok('list').cellar.find(w => w.producer === 'Jadot');
+  props.setProperties({ REMINDERS_SENT: JSON.stringify({ [jadot.id + '|open|2023']: '2026-12-31' }) });
+  for (let i = 0; i < 300; i++) ok('create', { wine: { producer: 'Producer ' + i, wine: 'Cuvée', vintage: 2020, window: '2027–2035' } });
+
+  const sentCount = backend.sendReminders_('2027-01-01');
+  assert.ok(sentCount >= 301, 'every bottle opening in 2027 is reminded');
+  assert.equal(props.getProperty('REMINDERS_SENT'), null, 'the old property is gone');
+  const logged = tab('Reminders log').rows.slice(1).map(r => r[0]);
+  assert.ok(logged.includes(jadot.id + '|open|2023'), 'and its contents were kept');
+  assert.ok(logged.length > 300);
+  gas._fetches.length = 0;
+  assert.equal(backend.sendReminders_('2027-01-01'), 0, 'nothing repeats');
+});
+
+/* ============================== Reads, rows and locks ============================== */
+
+test('a request reads each tab once, and again only after writing to it', () => {
+  const { ok, gas } = freshCellar();
+  const reads = () => { const r = { ...gas._reads }; for (const k of Object.keys(gas._reads)) delete gas._reads[k]; return r; };
+  reads();
+  ok('list');
+  assert.deepEqual(reads(), { Cellar: 1, Consumed: 1, Lists: 1, Settings: 1 });
+  const drunkId = ok('list').consumed[0].id;
+  reads();
+  ok('update', { id: drunkId, wine: { rating: 9 } });
+  const r = reads();
+  assert.equal(r.Cellar, 1, 'Cellar is read once, though it is searched and then sent back');
+  assert.equal(r.Consumed, 3, 'Consumed: the read, the row check before writing, and the fresh copy sent back');
+});
+
+test('locked writes never use a copy of the sheet read before the lock', () => {
+  const { backend, tab, ok } = freshCellar();
+  const jadot = ok('list').cellar.find(w => w.producer === 'Jadot');
+  const t = backend.table_('Cellar');  // read and cached, as a Telegram button lookup does
+  backend.readRows_(t);
+  const sheet = tab('Cellar');
+  const row = sheet.rows.find(r => r[t.col.id] === jadot.id);
+  row[t.col.bottles] = '5';  // meanwhile another request (or a hand edit) changes the count
+  const res = backend.withLock_(() => backend.adjustBottles_(jadot.id, 1));
+  assert.equal(res.bottles, 6, 'builds on the sheet as it is now, not the cached 1');
+});
+
+test('a save lands on the right bottle even if the sheet is sorted by hand meanwhile', () => {
+  const { backend, tab, ok } = freshCellar();
+  const t = backend.table_('Cellar');
+  const jadot = backend.readRows_(t).find(r => r.rec.producer === 'Jadot');
+  const sheet = tab('Cellar');
+  sheet.rows = [sheet.rows[0], ...sheet.rows.slice(1).reverse()];  // someone sorts the tab
+  backend.writeRow_(t, jadot.row, backend.encode_(t, { ...jadot.rec, price: 999 }, jadot.cells));
+  const list = ok('list').cellar;
+  assert.equal(list.find(w => w.producer === 'Jadot').price, 999);
+  assert.equal(list.filter(w => w.price === 999).length, 1, 'no other bottle was overwritten');
+
+  const t2 = backend.table_('Cellar');
+  const duroche = backend.readRows_(t2).find(r => r.rec.producer === 'Duroche');
+  sheet.rows = sheet.rows.filter(r => r[t2.col.producer] !== 'Duroche');  // someone deletes the row
+  assert.throws(() => backend.writeRow_(t2, duroche.row, duroche.cells), /sheet changed while saving/);
+});
+
+test('wrong passkeys lock out only that device, with a backstop across all devices', () => {
+  const { backend } = freshCellar();
+  const login = (key, device) => backend.handle_({ action: 'login', key, device });
+  for (let i = 0; i < 8; i++) assert.equal(login('wrong', 'attacker-device-1').auth, false);
+  assert.match(login(PASSKEY, 'attacker-device-1').error, /Too many wrong passkeys/);
+  assert.equal(login(PASSKEY, 'owner-phone-0001').ok, true, 'the owner is not locked out');
+  for (let d = 0; d < 40; d++) login('wrong', 'random-device-' + d);
+  assert.match(login(PASSKEY, 'owner-phone-0001').error, /Too many/, 'many devices at once still trip the backstop');
+});
+
+test('status() checks the deployed build, hides secrets and lists timers', () => {
+  const { backend, gas } = freshBot();
+  backend.installTelegram();
+  gas._replies.exec = () => ({ ok: true, build: 'older-build' });
+  const out = backend.status().join('\n');
+  assert.match(out, /Web app: running build older-build\. Deploy → Manage deployments/);
+  assert.match(out, /TELEGRAM_TOKEN = \(set, hidden\)/);
+  assert.match(out, /PASS_HASH = \(set, hidden\)/);
+  assert.doesNotMatch(out, /123:abc/, 'the token never appears');
+  assert.match(out, /Timers: pollTelegram, sendReminders/);
+  assert.match(out, /Time zone: Asia\/Singapore/);
+  gas._replies.exec = () => ({ ok: true, build: backend.BUILD });
+  assert.match(backend.status().join('\n'), /Web app: running this build/);
+  gas._replies.exec = () => ({ ok: true });
+  assert.match(backend.status().join('\n'), /Web app: running an older version/, 'the cellar\'s data without a build');
+  gas._replies.exec = () => 'not json';
+  assert.match(backend.status().join('\n'), /Web app: couldn't check/, 'no false "redeploy" when the answer isn\'t the cellar');
+  gas._service.url = 'https://script.google.com/macros/s/x/dev';
+  gas._replies.exec = undefined;
+  gas._replies.dev = () => ({ ok: true, build: 'whatever' });
+  assert.match(backend.status().join('\n'), /Web app: couldn't check/, 'a /dev URL is the test version, not the deployment');
 });

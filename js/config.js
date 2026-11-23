@@ -6,8 +6,7 @@ export const config = {
   apiUrl: "https://script.google.com/macros/s/AKfycbycMQbR1ULvpJw683lY3QYqfbcNe-IUzOMtfrOfBNtDtmONT8o1UQKHAnmeUkRCdVbG/exec",
 
   cellarName: "The Cellar",  // the last word is set in italics
-  currency: "S$",
-  locale: "en-SG",
+  locale: "en-SG",           // dates and numbers. Currency is in the sheet's Settings tab.
 
   // Passkey for demo mode only. Your real passkey lives in Apps Script, never in this repo.
   demoPasskey: "cellar",

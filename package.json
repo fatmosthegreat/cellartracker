@@ -3,8 +3,8 @@
   "private": true,
   "description": "Wine cellar list: static front end on GitHub Pages, Google Apps Script + Sheets back end.",
   "scripts": {
-    "start": "python3 -m http.server 8000",
+    "start": "python -m http.server 8000",
     "test": "node --test"
   },
-  "engines": { "node": ">=18" }
+  "engines": { "node": ">=22" }
 }

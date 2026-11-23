@@ -82,8 +82,9 @@ h1 em { font-style: italic; color: var(--claret); }
   position: absolute; top: 50%; height: 12px; transform: translateY(-50%); z-index: 1;
   border-radius: 6px; background: var(--claret); border: 2px solid var(--claret);
 }
-.tl-bar[data-c="white"], .tl-bar[data-c="sparkling"], .tl-bar[data-c="sweet"] { background: var(--straw); border-color: var(--straw); }
-.tl-bar[data-c="rosé"] { background: var(--rose); border-color: var(--rose); }
+/* data-tone comes from the colourTone column of the Lists tab in the sheet. */
+.tl-bar[data-tone="white"] { background: var(--straw); border-color: var(--straw); }
+.tl-bar[data-tone="rose"] { background: var(--rose); border-color: var(--rose); }
 .tl-bar.hold { background: transparent; }        /* not ready: an outline you're waiting to fill */
 .tl-bar.late { opacity: .35; }
 .tl-axis .tl-track { min-height: 26px; border-top: 1px solid var(--ink); }
@@ -125,8 +126,7 @@ h1 em { font-style: italic; color: var(--claret); }
 }
 .vin.nv { font-size: 1.4rem; font-style: italic; padding-top: 6px; }
 /* White-wine years in straw, matching the swatch and timeline bar. */
-.vin[data-c="white"], .vin[data-c="sparkling"], .vin[data-c="sweet"],
-.tl-label b[data-c="white"], .tl-label b[data-c="sparkling"], .tl-label b[data-c="sweet"] { color: var(--straw); }
+.vin[data-tone="white"], .tl-label b[data-tone="white"], .ts-vin[data-tone="white"] { color: var(--straw); }
 .body { min-width: 0; }
 .line { display: flex; align-items: flex-end; align-items: last baseline; gap: 8px; }
 .title { min-width: 0; overflow-wrap: anywhere; }
@@ -137,8 +137,8 @@ h1 em { font-style: italic; color: var(--claret); }
 .price { font-variant-numeric: tabular-nums; font-weight: 500; white-space: nowrap; }
 .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 5px; font-size: .82rem; color: var(--muted); }
 .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--claret); }
-.swatch[data-c="white"], .swatch[data-c="sparkling"], .swatch[data-c="sweet"] { background: var(--straw); }
-.swatch[data-c="rosé"] { background: var(--rose); }
+.swatch[data-tone="white"] { background: var(--straw); }
+.swatch[data-tone="rose"] { background: var(--rose); }
 .rating { font-family: var(--display); font-size: 1rem; color: var(--ink); }
 .rating small { font-family: var(--body); font-size: .7rem; color: var(--muted); }
 .pill {
@@ -150,6 +150,26 @@ h1 em { font-style: italic; color: var(--claret); }
 .pill.late { color: var(--late); }
 .pill.hidden { color: var(--muted); border-style: dashed; }
 .notes { font-family: var(--display); font-style: italic; font-size: 1rem; margin: 8px 0 0; max-width: 60ch; }
+/* Consumed bottles open a tasting card, so the list just shows a one-line preview of the notes. */
+.entry.consumed { cursor: pointer; }
+.entry-open { font: inherit; color: inherit; background: none; border: 0; padding: 0; text-align: left; cursor: pointer; }
+.entry.consumed:hover .cuvee, .entry-open:focus-visible .cuvee { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.entry.consumed .notes { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; line-clamp: 1; overflow: hidden; }
+
+/* ---------- Drinking history (top of the Consumed section) ---------- */
+.history { display: grid; gap: 16px; padding: 10px 0 20px; border-bottom: 1px solid var(--rule); }
+.months { display: grid; grid-template-columns: repeat(12, 1fr); gap: 6px; height: 72px; }
+.month { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
+.month .bar { flex: 1; width: 100%; display: flex; align-items: flex-end; justify-content: center; }
+.month i { display: block; width: 100%; max-width: 22px; border-radius: 3px 3px 0 0; background: var(--claret); }
+.month i.zero { background: var(--rule); }
+.month small { font-size: .68rem; line-height: 1; color: var(--muted); }
+.history-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px 22px; margin: 0; font-size: .88rem; }
+.history-facts dt { font-size: .7rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+.history-facts dd { margin: 3px 0 0; }
+.history-facts small { color: var(--muted); font-variant-numeric: tabular-nums; }
+.history-facts .linkbtn { color: var(--ink); text-align: left; }
+
 .actions { display: none; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .is-owner .actions { display: flex; }
 .empty { color: var(--muted); font-style: italic; padding: 14px 0; margin: 0; }
@@ -171,6 +191,7 @@ h1 em { font-style: italic; color: var(--claret); }
   padding: 12px 20px; font-size: .95rem; border-radius: 999px; box-shadow: 0 8px 24px rgba(0, 0, 0, .22);
 }
 footer { margin-top: 48px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; font-size: .82rem; color: var(--muted); }
+.footer-links { display: flex; gap: 18px; margin-left: auto; }
 .linkbtn { font: inherit; background: none; border: 0; padding: 0; color: var(--muted); text-decoration: underline; cursor: pointer; }
 .linkbtn:hover { color: var(--ink); }
 
@@ -206,6 +227,21 @@ details[open] summary { margin-bottom: 12px; }
 .form-error { color: var(--late); font-size: .88rem; margin: 0; }
 .form-error:empty { display: none; }
 
+/* Tasting card */
+#ts-body { display: grid; gap: 12px; }
+#ts-body .eyebrow { margin: 0; }
+#ts-body h3 em { font-style: italic; font-size: .8em; }
+.ts-vin { color: var(--claret); }
+.ts-rating { font-family: var(--display); font-size: 2.6rem; line-height: 1; margin: 2px 0; }
+.ts-rating small { font-family: var(--body); font-size: .9rem; color: var(--muted); }
+.ts-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 18px; margin: 0; font-size: .9rem; }
+.ts-facts dt { color: var(--muted); }
+.ts-facts dd { margin: 0; }
+.ts-notes {
+  font-family: var(--display); font-style: italic; font-size: 1.12rem; line-height: 1.55; white-space: pre-wrap;
+  margin: 0; padding-top: 14px; border-top: 1px solid var(--rule); overflow-wrap: anywhere;
+}
+
 .toast {
   position: fixed; left: 50%; bottom: max(24px, env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 50;
   background: var(--ink); color: var(--paper); padding: 9px 18px; border-radius: 999px; font-size: .88rem;
@@ -225,3 +261,22 @@ details[open] summary { margin-bottom: 12px; }
   dialog { width: 100vw; max-width: 100vw; margin: auto 0 0; border-radius: 18px 18px 0 0; max-height: 92dvh; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* ---------- Print: a clean wine list (the Print button shows only bottles in the cellar) ---------- */
+@media print {
+  /* Always the light palette, even when the screen is in dark mode. */
+  :root {
+    --paper: #FFFFFF; --surface: #FFFFFF; --ink: #1F1B1C; --muted: #5E5755; --rule: #CFC9C0;
+    --claret: #7A1D32; --straw: #9A7A1E; --rose: #B8646C; color-scheme: light;
+  }
+  @page { margin: 16mm 14mm; }
+  body { background: #fff; font-size: 11pt; }
+  .wrap { max-width: none; padding: 0; }
+  .toolbar, .fab, footer, .toast, .actions, .timeline, .history, .stats, .demo-note, .pill, dialog { display: none !important; }
+  .masthead { padding-bottom: 12px; }
+  h1 { font-size: 34pt; }
+  .group { margin-top: 18px; }
+  .entry { break-inside: avoid; padding: 9px 0; }
+  .vin { font-size: 18pt; }
+  .entry.consumed .notes { -webkit-line-clamp: unset; line-clamp: unset; display: block; }
+}

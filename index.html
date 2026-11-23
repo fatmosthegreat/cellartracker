@@ -4,10 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Cellar</title>
-<meta name="description" content="A cellar list: what's in the cellar, what's on the way, and what's been drunk.">
+<meta name="description" content="A cellar list: what's in the cellar, what's on the way, and what's been opened.">
 <meta name="theme-color" content="#ECEAE4" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#151213" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-title" content="Cellar">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237A1D32'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='Georgia,serif' font-style='italic' font-size='20' fill='%23ECEAE4'%3EC%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -31,7 +36,7 @@
       <button class="chip" type="button" data-filter="All" aria-pressed="true">All</button>
       <button class="chip" type="button" data-filter="In cellar" aria-pressed="false">In the cellar</button>
       <button class="chip" type="button" data-filter="To collect" aria-pressed="false">To collect</button>
-      <button class="chip" type="button" data-filter="Drunk" aria-pressed="false">Drunk</button>
+      <button class="chip" type="button" data-filter="Consumed" aria-pressed="false">Consumed</button>
     </div>
     <input class="search" id="search" type="search" placeholder="Search producer, wine, grape" aria-label="Search the cellar">
   </div>
@@ -40,15 +45,20 @@
 
   <footer>
     <span id="owner-state"></span>
-    <button class="linkbtn" id="owner-link" type="button">Owner login</button>
+    <span class="footer-links">
+      <button class="linkbtn" id="print-link" type="button">Print the list</button>
+      <button class="linkbtn" id="owner-link" type="button">Owner login</button>
+    </span>
   </footer>
 </div>
 
 <button class="btn primary fab" id="add" type="button">+ Add bottle</button>
 <div class="toast" id="toast" role="status"></div>
 <datalist id="producers"></datalist>
+<datalist id="grapes"></datalist>
+<datalist id="places"></datalist>
 
-<!-- Add or edit a bottle. Fields marked data-for only show for that tab (cellar or drunk). -->
+<!-- Add or edit a bottle. Fields marked data-for only show for that tab ((cellar or consumed)). -->
 <dialog id="editor" aria-labelledby="ed-title">
   <form class="dlg" id="ed-form" novalidate>
     <h3 id="ed-title">Add a bottle</h3>
@@ -64,8 +74,8 @@
       <div class="field" data-for="cellar"><label for="f-bottles" id="ed-bottles-label">How many</label>
         <input id="f-bottles" name="bottles" type="number" min="1" step="1" inputmode="numeric"></div>
     </div>
-    <div class="grid2" data-for="drunk">
-      <div class="field"><label for="f-drunkOn">Drunk on</label><input id="f-drunkOn" name="drunkOn" type="date"></div>
+    <div class="grid2" data-for="consumed">
+      <div class="field"><label for="f-consumedOn">Consumed on</label><input id="f-consumedOn" name="consumedOn" type="date"></div>
       <div class="field"><label for="f-rating">Rating /10</label>
         <input id="f-rating" name="rating" type="number" min="0" max="10" step="0.5" inputmode="decimal"></div>
     </div>
@@ -74,12 +84,10 @@
       <div class="more">
         <div class="grid2">
           <div class="field"><label for="f-colour">Colour</label>
-            <select id="f-colour" name="colour">
-              <option value="">Not set</option><option>Red</option><option>White</option><option>Rosé</option>
-              <option>Sparkling</option><option>Sweet</option><option>Fortified</option>
-            </select></div>
+            <!-- Options come from the Lists tab in the sheet (js/app.js fills them in). -->
+            <select id="f-colour" name="colour"><option value="">Not set</option></select></div>
           <div class="field"><label for="f-grape">Grape</label>
-            <input id="f-grape" name="grape" autocomplete="off" placeholder="Pinot Noir"></div>
+            <input id="f-grape" name="grape" autocomplete="off" list="grapes" placeholder="Pinot Noir"></div>
         </div>
         <div class="grid2" data-for="cellar">
           <div class="field"><label for="f-window">Drinking window</label>
@@ -89,7 +97,7 @@
         </div>
         <div class="grid2">
           <div class="field" data-for="cellar"><label for="f-storage">Where it is</label>
-            <input id="f-storage" name="storage" autocomplete="off" placeholder="Friend's fridge"></div>
+            <input id="f-storage" name="storage" autocomplete="off" list="places" placeholder="Friend's fridge"></div>
           <div class="field"><label for="f-purchased">Bought on</label><input id="f-purchased" name="purchased" type="date"></div>
         </div>
         <div class="grid2" data-for="cellar">
@@ -110,25 +118,35 @@
   </form>
 </dialog>
 
-<!-- Drank one: moves a bottle from the Cellar tab to the Drunk tab -->
+<!-- Opened one: moves a bottle from the Cellar tab to the Consumed tab -->
 <dialog id="drinker" aria-labelledby="dr-title">
   <form class="dlg" id="dr-form" novalidate>
     <h3 id="dr-title">How was it?</h3>
     <p class="sub" id="dr-sub"></p>
     <div class="grid2">
-      <div class="field"><label for="d-date">Drunk on</label><input id="d-date" name="drunkOn" type="date"></div>
+      <div class="field"><label for="d-date">Consumed on</label><input id="d-date" name="consumedOn" type="date"></div>
       <div class="field"><label for="d-rating">Rating /10 <span class="opt">· optional</span></label>
         <input id="d-rating" name="rating" type="number" min="0" max="10" step="0.5" inputmode="decimal"></div>
     </div>
-    <div class="field" id="dr-count-row"><label for="d-count">Bottles drunk</label>
+    <div class="field" id="dr-count-row"><label for="d-count">Bottles opened</label>
       <input id="d-count" name="count" type="number" min="1" step="1" inputmode="numeric"></div>
     <div class="field"><label for="d-notes">Tasting notes <span class="opt">· optional</span></label>
       <textarea id="d-notes" name="notes" placeholder="Tight at first, opened up after an hour…"></textarea></div>
     <p class="form-error" role="alert"></p>
     <div class="dlg-foot"><span class="spacer"></span>
       <button type="button" class="btn" data-close>Cancel</button>
-      <button type="submit" class="btn primary" id="dr-save">Move to Drunk</button></div>
+      <button type="submit" class="btn primary" id="dr-save">Move to Consumed</button></div>
   </form>
+</dialog>
+
+<!-- Tasting card: opens when a consumed bottle is tapped. Anyone can see it; Edit is for the owner. -->
+<dialog id="tasting" aria-labelledby="ts-title">
+  <div class="dlg">
+    <div id="ts-body"></div>
+    <div class="dlg-foot"><span class="spacer"></span>
+      <button type="button" class="btn" id="ts-edit">Edit</button>
+      <button type="button" class="btn primary" data-close>Close</button></div>
+  </div>
 </dialog>
 
 <dialog id="login" aria-labelledby="lg-title">
