@@ -209,7 +209,7 @@ function loadBackend(gas, codeSource) {
     codeSource + '\n;return { handle_, doGet, doPost, setup, migrate, sha256_, SCHEMA,' +
     ' handleTelegram_, addTelegramGuest, removeTelegramGuests, messageGuests, messageGuests_, sendReminders_, remindersDue_, installTelegram, uninstallTelegram, findTelegramChatId, pollTelegram,' +
     ' setLabelReader, relaySecret, installTelegramRelay_, sendReminders, status, lookups_, checkKey_, BUILD,' +
-    ' table_, readRows_, writeRow_, encode_, withLock_, adjustBottles_ };');
+    ' dueDate_, table_, readRows_, writeRow_, encode_, withLock_, adjustBottles_ };');
   return factory(...names.map(n => gas[n]));
 }
 

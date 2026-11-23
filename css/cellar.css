@@ -245,6 +245,9 @@ details[open] summary { margin-bottom: 12px; }
   border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); color: var(--ink);
 }
 .ai-status { margin: 0; font-size: .85rem; color: var(--muted); }
+.ai-thumb { display: flex; align-items: center; gap: 10px; }
+.ai-thumb img { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; border: 1px solid var(--rule); }
+.field [aria-invalid="true"] { border-color: var(--late); outline-color: var(--late); }
 .ai-status:empty { display: none; }
 .ai-status.error { color: var(--late); }
 .ai-status .linkbtn { margin-left: 4px; }
@@ -278,6 +281,8 @@ details[open] summary { margin-bottom: 12px; }
   opacity: 0; transition: opacity .2s; pointer-events: none; width: max-content; max-width: calc(100vw - 32px);
 }
 .toast.show { opacity: 1; }
+.toast.show:has(button) { pointer-events: auto; }
+.toast .linkbtn { color: inherit; margin-left: 8px; font-weight: 600; }
 .toast.error { background: var(--late); color: var(--surface); }
 
 @media (max-width: 520px) {

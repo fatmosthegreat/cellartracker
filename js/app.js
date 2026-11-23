@@ -113,16 +113,32 @@ function fillColours(current) {
 }
 
 let toastTimer;
-function toast(message, isError = false) {
+// `undo`, if given, adds an Undo button that runs it (for one-tap changes like +1 bottle).
+function toast(message, isError = false, undo = null) {
   const t = $("#toast");
   t.textContent = message;
+  if (undo) {
+    const b = Object.assign(document.createElement("button"), { type: "button", className: "linkbtn", textContent: "Undo" });
+    b.addEventListener("click", async () => {
+      t.classList.remove("show");
+      try { await undo(); toast("Undone"); } catch (err) { toast(err.message, true); }
+    }, { once: true });
+    t.append(b);
+  }
   t.classList.toggle("error", isError);
   t.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove("show"), isError ? 5000 : 2600);
+  toastTimer = setTimeout(() => t.classList.remove("show"), isError ? 5000 : undo ? 6000 : 2600);
 }
 
 /* ---------- Dialog helpers ---------- */
+
+// A form card remembers how it opened, so closing it by accident can't lose what you typed.
+const formState = d => JSON.stringify(readFields($("form", d)));
+function remember(d) { d.dataset.start = formState(d); }
+function mayClose(d) {
+  return !d.dataset.start || d.dataset.start === formState(d) || confirm("Discard your changes?");
+}
 
 // Runs a save from inside a dialog: busy button, inline error, close on success.
 async function submitFrom(dialog, button, work, okMessage) {
@@ -179,6 +195,8 @@ function openEditor(found) {
   $("#ed-bottles-label").textContent = found ? "Bottles" : "How many";
   if (found) fillFields(form, found.wine);
   else fillFields(form, { purchased: todayISO(), status: "In cellar", bottles: 1 });
+  showOrderFields();
+  form.querySelectorAll("[aria-invalid]").forEach(el => el.removeAttribute("aria-invalid"));
   const del = $("#ed-delete");
   del.hidden = !found;
   del.removeAttribute("data-armed");
@@ -186,9 +204,17 @@ function openEditor(found) {
   $("#ed-more").open = !!found;
   resetAi();
   $("#ai-toggle").hidden = !!found || isDemo;  // demo mode has no AI key behind it
+  remember($("#editor"));
   $("#editor").showModal();
   if (!found) $("#f-producer").focus();
 }
+
+// Collect or delivery and Due by only matter for a bottle on order.
+function showOrderFields() {
+  const order = $("#f-status").value === "On order";
+  document.querySelectorAll(".order-only").forEach(el => { el.hidden = !order; });
+}
+$("#f-status").addEventListener("change", showOrderFields);
 
 /* ---------- ✨ Fill in with AI (when adding) ---------- */
 // The text and photo go to the backend's `identify` action, the same code the Telegram bot uses,
@@ -198,13 +224,26 @@ function openEditor(found) {
 let aiPhoto = null;  // { media_type, data } once shrunk, or null
 
 function resetAi() {
-  aiPhoto = null;
   $("#ai-panel").hidden = true;
   $("#ai-toggle").setAttribute("aria-expanded", "false");
   $("#ai-text").value = "";
-  $("#ai-photo").value = "";
-  $(".ai-cam").classList.remove("has-photo");
+  setPhoto(null);
   aiStatus("");
+}
+
+// The chosen photo (or none): the camera button, the thumbnail and Fill in all follow it.
+function setPhoto(photo) {
+  aiPhoto = photo;
+  $(".ai-cam").classList.toggle("has-photo", !!photo);
+  $("#ai-thumb").hidden = !photo;
+  $("#ai-thumb img").src = photo ? `data:${photo.media_type};base64,${photo.data}` : "";
+  if (!photo) $("#ai-photo").value = "";
+  updateAiGo();
+}
+
+// Fill in is only usable with something to look up.
+function updateAiGo() {
+  $("#ai-go").disabled = !$("#ai-text").value.trim() && !aiPhoto;
 }
 
 // Status under the panel. Set with textContent only, so nothing in a reply can become HTML.
@@ -238,19 +277,24 @@ async function fillWithAi(strong) {
   if (!text && !aiPhoto) return aiStatus("Type the wine or add a photo first.", true);
   const go = $("#ai-go");
   go.disabled = true;
+  $("#ed-save").disabled = true;  // no saving a half-filled bottle mid-lookup
   aiStatus(strong ? "Asking the stronger model…" : "Looking it up…");
   try {
     const w = (await run("identify", { identify: { text, photo: aiPhoto, strong } })).result;
     const form = $("#ed-form");
-    fillColours(w.colour);
-    for (const k of ["producer", "wine", "vintage", "colour", "grape"]) form.elements[k].value = w[k] || "";
+    const colour = form.elements.colour.value;
+    fillColours(w.colour || colour);
+    form.elements.colour.value = colour;
+    // Only what the AI found: a blank answer never wipes what you typed.
+    for (const k of ["producer", "wine", "vintage", "colour", "grape"]) if (w[k]) form.elements[k].value = w[k];
     $("#ed-more").open = true;
     aiStatus("Filled in. Check it, add the drinking window, then Save.", false, !strong);
     $("#f-window").focus();
   } catch (err) {
     aiStatus(err.message, true);
   } finally {
-    go.disabled = false;
+    $("#ed-save").disabled = false;
+    updateAiGo();
   }
 }
 
@@ -263,20 +307,25 @@ $("#ai-toggle").addEventListener("click", () => {
 
 $("#ai-photo").addEventListener("change", async e => {
   const file = e.target.files[0];
-  aiPhoto = null;
-  $(".ai-cam").classList.remove("has-photo");
   if (!file) return;
+  aiStatus("Preparing photo…");
   try {
-    aiPhoto = await shrinkPhoto(file);
-    $(".ai-cam").classList.add("has-photo");
+    setPhoto(await shrinkPhoto(file));
     aiStatus("Photo ready. Add a note if you like, then tap Fill in.");
   } catch {
+    setPhoto(null);
     aiStatus("That photo couldn't be opened. Try another.", true);
   }
 });
+$("#ai-unphoto").addEventListener("click", () => { setPhoto(null); aiStatus(""); });
+$("#ai-text").addEventListener("input", updateAiGo);
 
 // Enter in the AI box looks the wine up; it must not submit (save) the form.
-$("#ai-text").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); fillWithAi(false); } });
+$("#ai-text").addEventListener("keydown", e => {
+  if (e.key !== "Enter") return;
+  e.preventDefault();
+  if (!$("#ai-go").disabled) fillWithAi(false);
+});
 $("#ai-go").addEventListener("click", () => fillWithAi(false));
 $("#ai-status").addEventListener("click", e => { if (e.target.closest("[data-strong]")) fillWithAi(true); });
 
@@ -284,9 +333,14 @@ $("#ed-form").addEventListener("submit", e => {
   e.preventDefault();
   const form = e.currentTarget;
   const wine = readFields(form);
-  const problem = !wine.producer || !wine.wine ? "Add a producer and a wine name."
-    : wine.vintage && !/^\d{4}$/.test(wine.vintage) ? "Vintage should be a year like 2020, or blank for NV." : "";
-  if (problem) { $(".form-error", form).textContent = problem; return; }
+  const bad = !wine.producer ? ["producer", "Add a producer."] : !wine.wine ? ["wine", "Add the wine's name."]
+    : wine.vintage && !/^\d{4}$/.test(wine.vintage) ? ["vintage", "Vintage should be a year like 2020, or blank for NV."] : null;
+  if (bad) {
+    $(".form-error", form).textContent = bad[1];
+    form.elements[bad[0]].setAttribute("aria-invalid", "true");
+    form.elements[bad[0]].focus();
+    return;
+  }
 
   if (editing) {
     submitFrom($("#editor"), $("#ed-save"), () => run("update", { id: editing.wine.id, wine }), "Saved");
@@ -295,6 +349,9 @@ $("#ed-form").addEventListener("submit", e => {
       res.result.merged ? `You already had this one. Now ${res.result.bottles} bottles.` : "Added to the cellar");
   }
 });
+
+// Typing in a field marked wrong clears the mark.
+$("#ed-form").addEventListener("input", e => e.target.removeAttribute("aria-invalid"));
 
 $("#ed-delete").addEventListener("click", e => {
   const b = e.currentTarget;
@@ -324,6 +381,7 @@ function openDrinker(wine) {
   form.elements.count.value = 1;
   form.elements.consumedOn.value = todayISO();
   form.elements.notes.value = wine.notes || "";
+  remember($("#drinker"));
   $("#drinker").showModal();
 }
 
@@ -393,13 +451,14 @@ $("#lg-form").addEventListener("submit", e => {
 /* ---------- Events ---------- */
 
 document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", () => b.closest("dialog").close()));
-// Every card closes on a tap outside it: the dialog element itself is only the target on its
-// backdrop. The press must start there too, so dragging to select text in a field and letting
-// go outside the card doesn't close it.
+// Every card closes on a tap outside it or Esc: the dialog element itself is only the target on
+// its backdrop. The press must start there too, so dragging to select text in a field and
+// letting go outside the card doesn't close it. A form you've changed asks first.
 document.querySelectorAll("dialog").forEach(d => {
   let fromBackdrop = false;
   d.addEventListener("pointerdown", e => { fromBackdrop = e.target === d; });
-  d.addEventListener("click", e => { if (fromBackdrop && e.target === d) d.close(); fromBackdrop = false; });
+  d.addEventListener("click", e => { if (fromBackdrop && e.target === d && mayClose(d)) d.close(); fromBackdrop = false; });
+  d.addEventListener("cancel", e => { if (!mayClose(d)) e.preventDefault(); });
 });
 document.querySelectorAll(".chip").forEach(b => b.addEventListener("click", () => { state.filter = b.dataset.filter; render(); }));
 $("#search").addEventListener("input", e => { state.q = e.target.value; render(); });
@@ -426,11 +485,13 @@ $("#list").addEventListener("click", async e => {
   try {
     if (act === "more") {
       const res = await run("adjust", { id: wine.id, delta: 1 });
-      toast(`${res.result.bottles} bottles of ${wine.producer} ${wine.wine}`);
+      toast(`${res.result.bottles} bottles of ${wine.producer} ${wine.wine}`, false,
+        () => run("adjust", { id: wine.id, delta: -1 }));
     }
     if (act === "arrived") {
+      const before = { status: wine.status, storage: wine.storage || null };
       await run("update", { id: wine.id, wine: { status: "In cellar", storage: null } });
-      toast("Moved into the cellar");
+      toast("Moved into the cellar", false, () => run("update", { id: wine.id, wine: before }));
     }
   } catch (err) {
     toast(err.message, true);

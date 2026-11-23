@@ -26,7 +26,7 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-23.16';
+const BUILD = '2026-11-24.1';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
@@ -376,7 +376,8 @@ function cleanValue_(field, value) {
   const s = String(value).trim();
   if (rule.type === 'int' || rule.type === 'number') {
     // Drop thousands separators and any currency in front: "S$1,200", "$45", "€ 30", "USD 80".
-    const n = Number(s.replace(/[,\s]/g, '').replace(/^[^\d.\-]+/, ''));
+    const digits = s.replace(/[,\s]/g, '').replace(/^[^\d.\-]+/, '');
+    const n = digits === '' ? NaN : Number(digits);  // "abc" is not 0
     const whole = rule.type === 'int';
     if (!isFinite(n) || (whole && !Number.isInteger(n)) || n < rule.min || n > rule.max) {
       throw new Error(rule.label + ' must be ' + (whole ? 'a whole number' : 'a number') + ' from ' + rule.min + ' to ' + rule.max + '.');
@@ -1024,9 +1025,10 @@ const TG_COMMANDS = {
   arrived: { menu: true, owner: true, help: 'Move a bottle on order into the cellar', run: function (q, recs) {
     return pickBottle_('coll', q, recs.filter(function (w) { return w.status === 'On order'; }), 'Which one has arrived?');
   } },
-  add: { menu: true, owner: true, help: 'Add a wine by name, e.g. /add rousseau gevrey 2019', run: function (q, recs, guest, chatId) {
-    if (!q) return { text: 'Type the wine after /add, e.g. /add rousseau gevrey 2019' };
-    startDraft_({ typed: q }, chatId, '🔍 Looking up the wine…');
+  add: { menu: true, owner: true, help: 'Add a wine, e.g. /add 2019 rousseau gevrey / 150', run: function (q, recs, guest, chatId) {
+    const p = splitPrice_(q);  // a bad price is refused here, before any Claude call
+    if (!p.text) return { text: 'Type the wine after /add, and the price after a /, e.g. /add 2019 rousseau gevrey / 150' };
+    startDraft_({ typed: p.text, price: p.price }, chatId, '🔍 Looking up the wine…');
   } },
   add1: { menu: true, owner: true, help: 'Add another bottle of a wine', run: function (q, recs) {
     return pickBottle_('add1', q, recs, 'Which wine did you buy another bottle of?');
@@ -1035,14 +1037,22 @@ const TG_COMMANDS = {
     return { text: menuCommands_(guest).map(function (c) { return '/' + c + ' · ' + escH_(TG_COMMANDS[c].help); }).join('\n') +
       '\n\nOr just type a name to search.' +
       (guest ? '' : ' Reminders arrive at ' + lookups_().settings.reminderHour + ':00 when something is due.' +
-        '\n📷 Send a photo of a label to add that bottle.') };
+        '\n📷 Send a photo of a label to add that bottle.' +
+        '\n\n<b>Tips</b>\n/add 2019 rousseau gevrey / 150 adds it with its price.' +
+        '\nOn a draft, send 2028-2040, price 150, vintage 2019 or due 5 Dec. Several at once: vintage 2019, price 150') };
   } },
 };
 TG_COMMANDS.start = { help: '', run: TG_COMMANDS.help.run };
 
-// What tapping a bottle's button does. Each returns the text that replaces the buttons.
+// What tapping a bottle's button does. Each returns the text that replaces the buttons, or
+// { text, buttons } to ask a follow-up question.
 const TG_ACTIONS = {
-  drink: function (w) {
+  drink: function (w) {  // opening can't be undone from the bot, so it asks first
+    return { text: 'Open ' + bottleLine_(w, true) + '?', buttons: [[
+      { text: '🍷 Yes, opened', callback_data: 'drinkok:' + w.id }, { text: 'Cancel', callback_data: 'keep:' + w.id }]] };
+  },
+  keep: function (w) { return 'Nothing changed. ' + bottleLine_(w, true) + ' is still in the cellar.'; },
+  drinkok: function (w) {
     const res = withLock_(function () { return drinkWine_(w.id, {}); });
     return '🍷 Opened ' + bottleLine_(w, true) + '\n' + (res.left ? res.left + ' left' : 'That was the last one') + '. Add a rating on the website.';
   },
@@ -1104,18 +1114,20 @@ function answerTelegram_(update, msg, chatId, guest, props) {
       labelTap_(lbl[1], lbl[2], msg, chatId, guest);
       return true;
     }
-    let text;
+    let out;
     try {
-      const m = /^(drink|coll|add1):(\w+)$/.exec(cb.data || '');
+      const m = /^(\w+):(\w+)$/.exec(cb.data || '');
       if (guest) throw new Error('Only the owner can change the cellar.');
-      if (!m) throw new Error('That button has expired.');
+      if (!m || !TG_ACTIONS[m[1]]) throw new Error('That button has expired.');
       const found = findIn_(table_('Cellar'), m[2]);
       if (!found) throw new Error('That bottle is no longer in the cellar.');
-      text = TG_ACTIONS[m[1]](found.rec);
+      out = TG_ACTIONS[m[1]](found.rec);
     } catch (err) {
-      text = '⚠️ ' + escH_(botError_(err));
+      out = '⚠️ ' + escH_(botError_(err));
     }
-    telegramApi_('editMessageText', { chat_id: chatId, message_id: msg.message_id, text: text, parse_mode: 'HTML' });
+    const edit = { chat_id: chatId, message_id: msg.message_id, text: out.text || out, parse_mode: 'HTML' };
+    if (out.buttons) edit.reply_markup = { inline_keyboard: out.buttons };
+    telegramApi_('editMessageText', edit);
     return true;
   }
 
@@ -1126,9 +1138,11 @@ function answerTelegram_(update, msg, chatId, guest, props) {
     else labelFromPhoto_(msg, chatId);
     return true;
   }
-  const draft = !guest && msg.text && msg.reply_to_message ? draftForMessage_(msg.reply_to_message.message_id) : null;
+  const text = String(msg.text || '').trim();
+  const draft = guest || !msg.text ? null : msg.reply_to_message ? draftForMessage_(msg.reply_to_message.message_id)
+    : looksLikeFix_(text) ? recentDraft_() : null;
   if (draft) {
-    fixFromReply_(draft, String(msg.text).trim(), chatId);
+    fixFromReply_(draft, text, chatId);
     return true;
   }
 
@@ -1214,16 +1228,18 @@ function sortCellar_(recs) {
 /* ---------- Label photos: add a bottle from a photo of its label ---------- */
 //
 // Send the bot a photo of a label, or type /add and the wine's name (spelling mistakes are fine).
+// A draft goes to the cellar unless you tap 📦 Order · collect or 🚚 Order · delivery on it; that
+// makes it a bottle on order and asks for the due date.
 // Claude Haiku works out producer, wine, cuvée, vintage, colour and grape, asks for the drinking
 // window, and the bot shows a draft with ✅ Add, ✏️ Fix, 🔁 Retry with Sonnet and ❌ Cancel. Nothing
 // is added until you tap Add. Retry reads the label again with Sonnet, the stronger and costlier
 // model, for labels Haiku gets wrong. You give the drinking window yourself by replying to the
-// draft with it ("2028-2040"); that needs no Claude call. Any other reply ("vintage 2019") is a
-// fix, which one short Haiku call applies. Cost: about US$0.0005 a label, about US$0.01 a Retry.
+// draft with it ("2028-2040"). Changes ("vintage 2019, price 150") are parsed here too: only
+// reading the wine calls Claude. Cost: about US$0.0005 a label, about US$0.01 a Retry.
 // Set up with setLabelReader(). Drafts are kept in the TG_DRAFTS Script Property (newest 10).
 
 const LABEL = {
-  reader: 'claude-haiku-5-5', retry: 'claude-sonnet-5-5', fixer: 'claude-haiku-5-5',
+  reader: 'claude-haiku-5-5', retry: 'claude-sonnet-5-5',
   apiVersion: '2026-10-21', maxDrafts: 10,
 };
 const DRAFT_FIELDS = ['producer', 'wine', 'cuvee', 'vintage', 'colour', 'grape'];
@@ -1238,8 +1254,19 @@ function setLabelReader() {
   Logger.log('Saved. Send your bot a photo of a label. Put the placeholder back afterwards.');
 }
 
+// The caption is a note, kept as it is (the price, if any, is added with ✏️ Fix or "price: 150").
 function labelFromPhoto_(msg, chatId) {
   startDraft_({ fileId: pickPhoto_(msg.photo).file_id, hint: trim_(msg.caption || '') }, chatId, '🔍 Reading the label…');
+}
+
+// /add's text: "2019 rousseau gevrey / S$150" → { text: '2019 rousseau gevrey', price: 150 }. The price is what
+// follows the last " /", checked like the website's price field. No " /" means no price, and a
+// "/" inside a word ("5/12") isn't one.
+function splitPrice_(text) {
+  const s = String(text);
+  const m = /(^|\s)\/([^\/]*)$/.exec(s);
+  if (!m) return { text: trim_(s), price: null };
+  return { text: trim_(s.slice(0, m.index)), price: cleanValue_('price', m[2]) };
 }
 
 // A new draft from a photo (`fileId`) or typed text (`typed`): read it, show it, then ask for
@@ -1259,6 +1286,8 @@ function startDraft_(d, chatId, status) {
   showDraft_(d);
   if (!d.problem) askDraft_(d, '🍷 What\'s the drinking window? e.g. <i>2028-2040</i>. Or tap ✅ Add on the draft to skip it.', 'e.g. 2028-2040');
 }
+
+function isOrder_(d) { return d.status === 'On order'; }
 
 // Asks a question about the draft with Telegram's reply box open; the reply goes to fixFromReply_.
 function askDraft_(d, text, placeholder) {
@@ -1338,17 +1367,16 @@ function readWine_(content, model) {
       'grapes, spelt like this where they fit: ' + lookups_().lists.grapes.join(', ') + '. Leave a field "" ' +
       'rather than guess. readable: false if you can\'t tell which wine it is.',
     messages: [{ role: 'user', content: content }],
-    schema: labelSchema_(false),
+    schema: labelSchema_(),
   });
 }
 
 // The colours come from the Lists tab, like everywhere else.
-function labelSchema_(withWindow) {
+function labelSchema_() {
   const str = { type: 'string' };
   const colours = lookups_().lists.colours.map(function (c) { return c.name; }).concat(['']);
   const props = { readable: { type: 'boolean' }, producer: str, wine: str, cuvee: str, vintage: str,
     colour: { type: 'string', enum: colours }, grape: str };
-  if (withWindow) props.window = str;
   return { type: 'object', additionalProperties: false, required: Object.keys(props), properties: props };
 }
 
@@ -1364,29 +1392,87 @@ function windowReply_(text) {
   return /^\D*\d{4}\D+\d{4}\D*$/.test(text) ? cleanWindow_(text) : '';
 }
 
-// The row ✏️ Fix sends: one "field: value" line per field, mapped to where the draft keeps it.
-const ROW_FIELDS = { producer: 'producer', wine: 'wine', cuvee: 'cuvee', vintage: 'vintage', colour: 'colour',
-  grape: 'grape', window: 'window', notes: 'hint' };
-
-function draftRow_(d) {
-  return Object.keys(ROW_FIELDS).map(function (k) { return k + ': ' + (d[ROW_FIELDS[k]] || ''); }).join('\n');
+// A reply that is just a date ("5 Dec", "5/12", "2026-12-05", "5 December 2026") as 2026-12-05,
+// or ''. Day before month. Without a year it's the next such date from `today`.
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+function dueDate_(text, today) {
+  const s = fold_(text).trim();
+  const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s);
+  const num = /^(\d{1,2})[\/.](\d{1,2})(?:[\/.](\d{4}))?$/.exec(s);
+  const named = /^(\d{1,2})\s*([a-z]{3})[a-z]*\.?(?:\s+(\d{4}))?$/.exec(s);
+  const ymd = iso ? [iso[1], iso[2], iso[3]] : num ? [num[3], num[2], num[1]]
+    : named ? [named[3], MONTHS.indexOf(named[2]) + 1, named[1]] : null;
+  if (!ymd) return '';
+  const m = Number(ymd[1]);
+  const d = Number(ymd[2]);
+  const at = function (y) { return y + '-' + ('0' + m).slice(-2) + '-' + ('0' + d).slice(-2); };
+  let y = Number(ymd[0]) || Number(today.slice(0, 4));
+  if (!ymd[0] && at(y) < today) y += 1;
+  const real = new Date(Date.UTC(y, m - 1, d));
+  return real.getUTCMonth() === m - 1 && real.getUTCDate() === d ? at(y) : '';
 }
 
-// A reply in that form, as { field: value }, or null if it isn't one. Fields left out stay as
-// they are, so "vintage: 2019" alone works too. A blank value clears the field.
+// The row ✏️ Fix sends: one "field: value" line per field, mapped to where the draft keeps it.
+// status, arrival and due are only sent for a bottle on order, but a reply can set them on any draft.
+const ROW_FIELDS = { producer: 'producer', wine: 'wine', cuvee: 'cuvee', vintage: 'vintage', colour: 'colour',
+  grape: 'grape', window: 'window', notes: 'hint', price: 'price', status: 'status', arrival: 'arrival', due: 'collectBy' };
+const ORDER_ROWS = ['status', 'arrival', 'due'];
+
+function draftRow_(d) {
+  return Object.keys(ROW_FIELDS).filter(function (k) { return isOrder_(d) || ORDER_ROWS.indexOf(k) < 0; })
+    .map(function (k) { const v = d[ROW_FIELDS[k]]; return k + ': ' + (v === null || v === undefined ? '' : v); }).join('\n');
+}
+
+// `value` spelt as in `values`, ignoring case, or an error naming the choices.
+function oneOf_(values, value, label) {
+  const hit = values.filter(function (v) { return fold_(v) === fold_(value); })[0];
+  if (!hit) throw new Error(label + ' should be one of: ' + values.join(', ') + '.');
+  return hit;
+}
+
+// Other names you might type for a field.
+const ROW_ALIASES = { color: 'colour', note: 'notes', 'drinking window': 'window', drink: 'window' };
+const ROW_NAMES = Object.keys(ROW_FIELDS).concat(Object.keys(ROW_ALIASES))
+  .sort(function (a, b) { return b.length - a.length; });
+
+// A reply in that form, as { field: value }, or null if it isn't one. A field name is followed by
+// ":" or a space ("price 150"), and fields are separated by new lines, " / " or commas
+// ("vintage 2019, price 150"). A comma not followed by a field name stays in the value, so notes
+// can have commas. Fields left out stay as they are; a blank value clears the field.
 function rowReply_(text) {
-  const lines = String(text).split('\n').filter(function (l) { return trim_(l); });
-  const parsed = lines.map(function (l) { return /^\s*([^:]+?)\s*:\s*(.*)$/.exec(l); });
-  const field = function (m) { const k = m ? fold_(m[1]) : ''; return { color: 'colour', note: 'notes' }[k] || k; };
-  if (!parsed.some(function (m) { return ROW_FIELDS[field(m)]; })) return null;
+  const parts = String(text).split(/(\n|\s\/\s|,)/);
   const row = {};
-  parsed.forEach(function (m, i) {
-    const key = field(m);
-    if (!ROW_FIELDS[key]) throw new Error('"' + trim_(lines[i]) + '" isn\'t a field. Each line should be one of: ' + Object.keys(ROW_FIELDS).join(', ') + '.');
-    row[key] = trim_(m[2]);
+  let last = null;
+  for (let i = 0; i < parts.length; i += 2) {
+    const seg = trim_(parts[i]);
+    if (!seg) continue;
+    const low = fold_(seg);
+    const name = ROW_NAMES.filter(function (n) { return low === n || low.indexOf(n + ':') === 0 || low.indexOf(n + ' ') === 0; })[0];
+    if (name) {
+      last = ROW_ALIASES[name] || name;
+      row[last] = trim_(seg.slice(name.length).replace(/^\s*:?/, ''));
+    } else if (last && parts[i - 1] === ',') {
+      row[last] += ',' + parts[i];
+    } else if (last) {
+      throw new Error('"' + seg + '" isn\'t a field. Use one of: ' + Object.keys(ROW_FIELDS).join(', ') + '.');
+    } else {
+      return null;
+    }
+  }
+  if (!last) return null;
+  Object.keys(row).forEach(function (k) {
+    row[k] = trim_(row[k]);
+    if (LIST_FIELDS[k] && row[k]) row[k] = matchList_(row[k], LIST_FIELDS[k](lookups_().lists));  // "white" → "White"
   });
   if (row.window && !cleanWindow_(row.window)) throw new Error('The window should look like 2028-2040.');
   if (row.vintage && !/^\d{4}$/.test(row.vintage)) throw new Error('The vintage should be a year like 2019, or blank for NV.');
+  if ('price' in row) row.price = cleanValue_('price', row.price);
+  if (row.status) row.status = oneOf_(FIELD_RULES.status.values, row.status, 'The status');
+  if (row.arrival) row.arrival = oneOf_(FIELD_RULES.arrival.values, row.arrival, 'arrival');
+  if (row.due) {
+    row.due = dueDate_(row.due, today_());
+    if (!row.due) throw new Error('The due date should look like 5 Dec or 2026-12-05.');
+  }
   return row;
 }
 
@@ -1504,16 +1590,23 @@ function draftView_(d) {
   const kind = [d.colour, d.grape].filter(Boolean).join(' · ');
   if (kind) lines.push(escH_(kind));
   lines.push(d.window ? 'Drink ' + escH_(d.window) : 'No drinking window yet.');
+  if (isOrder_(d)) {
+    lines.push('📦 On order' + (d.arrival ? ' · ' + escH_(d.arrival) : '') + (d.collectBy ? ' · due ' + niceDate_(d.collectBy) : ''));
+  }
+  if (d.price !== null && d.price !== undefined) lines.push('Price ' + escH_(lookups_().settings.currency) + money_(d.price));
   if (d.hint) lines.push('Note: ' + escH_(d.hint));
-  lines.push('', d.window ? 'Tap ✅ to add it, or ✏️ to change something.'
-    : 'Reply to this message with the drinking window (e.g. <i>2028-2040</i>), or tap ✅ to add it without one.');
+  const canOrder = !d.arrival;  // in the cellar, or an order still missing collect or delivery
+  lines.push('', (d.window ? 'Tap ✅ to add it, or ✏️ to change something.'
+    : 'Reply to this message with the drinking window (e.g. <i>2028-2040</i>), or tap ✅ to add it without one.') +
+    (canOrder ? ' On order? Tap 📦 or 🚚.' : ''));
   const buttons = [[btn('ok', '✅ Add'), btn('fix', '✏️ Fix')], [retry, btn('no', '❌ Cancel')]];
+  if (canOrder) buttons.splice(1, 0, [btn('collect', '📦 Order · collect'), btn('deliver', '🚚 Order · delivery')]);
   return { text: lines.join('\n'), buttons: buttons };
 }
 
 function draftWine_(d) {
   return { producer: d.producer, wine: wineField_(d), vintage: d.vintage, colour: d.colour, grape: d.grape,
-    window: d.window, notes: d.hint };
+    window: d.window, notes: d.hint, price: d.price, status: d.status, arrival: d.arrival, collectBy: d.collectBy };
 }
 
 // What tapping a draft's button does. Each gets the draft and `edit(text, buttons)`, which
@@ -1523,7 +1616,7 @@ const DRAFT_ACTIONS = {
     const res = withLock_(function () { return createWine_(draftWine_(d)); });
     dropDraft_(d.id);
     const line = bottleLine_({ vintage: d.vintage, producer: d.producer, wine: wineField_(d) }, true);
-    edit(res.merged ? '➕ ' + line + ' now ×' + res.bottles : '✅ Added ' + line + ' to the cellar.');
+    edit(res.merged ? '➕ ' + line + ' now ×' + res.bottles : '✅ Added ' + line + (isOrder_(d) ? ' as on order.' : ' to the cellar.'));
   },
   no: function (d, edit) {
     dropDraft_(d.id);
@@ -1533,12 +1626,27 @@ const DRAFT_ACTIONS = {
     askDraft_(d, 'Tap the row to copy it, change what\'s wrong, and send it back as a reply:\n\n<pre>' + escH_(draftRow_(d)) + '</pre>',
       'Paste the row and edit it');
   },
+  collect: arrivalTap_('Collect'),
+  deliver: arrivalTap_('Delivery'),
   retry: function (d, edit) {
     edit('🔍 Reading the label again with Sonnet…');
     readDraft_(d, LABEL.retry);
     showDraft_(d);
   },
 };
+
+// 📦 Order · collect or 🚚 Order · delivery: the bottle is on order, then the due date is asked for.
+function arrivalTap_(how) {
+  return function (d) {
+    d.status = 'On order';
+    d.arrival = how;
+    showDraft_(d);
+    if (!d.collectBy) {
+      askDraft_(d, (how === 'Collect' ? '📦 When can you collect it?' : '🚚 When does it arrive?') +
+        ' e.g. <i>5 Dec</i> or <i>2026-12-05</i>', 'e.g. 5 Dec');
+    }
+  };
+}
 
 // A tap on a draft's button. `msg` is the draft message, which each answer replaces.
 function labelTap_(act, id, msg, chatId, guest) {
@@ -1560,34 +1668,25 @@ function labelTap_(act, id, msg, chatId, guest) {
   }
 }
 
-// A reply to a draft. The edited row from ✏️ Fix, or just a window ("2028-2040"), is applied
-// straight away, with no Claude call. Anything else ("vintage 2019") is a fix that Claude applies.
-// The new draft goes to the bottom of the chat.
+// A change to a draft: the edited row from ✏️ Fix or "price 150"-style fields, just a window
+// ("2028-2040") or just a due date ("5 Dec"). All parsed here, with no Claude call. The old draft
+// message is deleted and the new one goes to the bottom of the chat.
 function fixFromReply_(d, text, chatId) {
   d.chatId = chatId;
   try {
-    if (!text) throw new Error('Type what to change, e.g. 2028-2040 or vintage 2019.');
     const row = rowReply_(text);
     const win = row ? '' : windowReply_(text);
+    const due = row || win ? '' : dueDate_(text, today_());
     if (row) {
       Object.keys(row).forEach(function (k) { d[ROW_FIELDS[k]] = k === 'window' ? cleanWindow_(row[k]) : row[k]; });
       d.problem = '';
     } else if (win) {
       d.window = win;
+    } else if (due) {
+      d.collectBy = due;
     } else {
-      const cur = { readable: true, window: d.window || '' };
-      DRAFT_FIELDS.forEach(function (k) { cur[k] = d[k] || ''; });
-      const got = claude_({
-        model: LABEL.fixer,
-        system: 'You correct a draft entry for a wine cellar list. Apply only the change the owner asks for, and ' +
-          'keep every other field exactly as it is. window is "YYYY-YYYY" or "". Spell grapes like this where ' +
-          'they fit: ' + lookups_().lists.grapes.join(', ') + '.',
-        messages: [{ role: 'user', content: 'Draft:\n' + JSON.stringify(cur) + '\n\nChange: ' + text }],
-        schema: labelSchema_(true),
-      });
-      DRAFT_FIELDS.forEach(function (k) { d[k] = trim_(got[k] || ''); });
-      d.window = cleanWindow_(got.window);
-      d.problem = '';
+      throw new Error('I didn\'t understand that. Send e.g. 2028-2040, price 150 or vintage 2019. Fields: ' +
+        Object.keys(ROW_FIELDS).join(', ') + '.');
     }
   } catch (err) {
     telegramSend_('⚠️ ' + escH_(botError_(err)), null, chatId);
@@ -1595,12 +1694,29 @@ function fixFromReply_(d, text, chatId) {
   }
   if (d.msgId) {
     try {
-      telegramApi_('editMessageText', { chat_id: chatId, message_id: d.msgId, text: '✏️ Changed, see below.' });
+      telegramApi_('deleteMessage', { chat_id: chatId, message_id: d.msgId });
     } catch (err) {
-      Logger.log(botError_(err));
+      Logger.log(botError_(err));  // Telegram only deletes messages up to 48 hours old
     }
   }
   showDraft_(d, true);
+}
+
+// Whether text sent without replying is a change for a draft rather than a search: a window, a
+// due date, or "field: value" (the colon keeps searches like "grape pinot" as searches).
+function looksLikeFix_(text) {
+  if (windowReply_(text) || dueDate_(text, today_())) return true;
+  if (text.indexOf(':') < 0) return false;
+  try { return !!rowReply_(text); } catch (err) { return true; }  // field-shaped: show its error
+}
+
+// The newest readable draft from the last 30 minutes, or null.
+function recentDraft_() {
+  const all = drafts_();
+  const since = new Date(Date.now() - 30 * 60000).toISOString();
+  return Object.keys(all).map(function (k) { return all[k]; })
+    .filter(function (d) { return String(d.saved) >= since && !d.problem; })
+    .sort(function (a, b) { return String(b.saved).localeCompare(String(a.saved)); })[0] || null;
 }
 
 /* ---------- Talking to Telegram ---------- */

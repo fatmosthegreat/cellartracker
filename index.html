@@ -74,6 +74,14 @@
       <div class="field" data-for="cellar"><label for="f-bottles" id="ed-bottles-label">How many</label>
         <input id="f-bottles" name="bottles" type="number" min="1" step="1" inputmode="numeric"></div>
     </div>
+    <div class="grid3" data-for="cellar">
+      <div class="field"><label for="f-status">Status</label>
+        <select id="f-status" name="status"><option>In cellar</option><option>On order</option></select></div>
+      <!-- Shown only when Status is On order (js/app.js). -->
+      <div class="field order-only"><label for="f-arrival">Collect or delivery</label>
+        <select id="f-arrival" name="arrival"><option value="">Not set</option><option>Collect</option><option>Delivery</option></select></div>
+      <div class="field order-only"><label for="f-collect">Due by</label><input id="f-collect" name="collectBy" type="date"></div>
+    </div>
     <div class="grid2" data-for="consumed">
       <div class="field"><label for="f-consumedOn">Consumed on</label><input id="f-consumedOn" name="consumedOn" type="date"></div>
       <div class="field"><label for="f-rating">Rating /10</label>
@@ -92,18 +100,11 @@
         <div class="grid2" data-for="cellar">
           <div class="field"><label for="f-window">Drinking window</label>
             <input id="f-window" name="drinkWindow" data-field="window" autocomplete="off" placeholder="2028–2035"></div>
-          <div class="field"><label for="f-status">Status</label>
-            <select id="f-status" name="status"><option>In cellar</option><option>On order</option></select></div>
+          <div class="field"><label for="f-storage">Where it is</label>
+            <input id="f-storage" name="storage" autocomplete="off" list="places" placeholder="Friend's fridge"></div>
         </div>
         <div class="grid2">
-          <div class="field" data-for="cellar"><label for="f-storage">Where it is</label>
-            <input id="f-storage" name="storage" autocomplete="off" list="places" placeholder="Friend's fridge"></div>
           <div class="field"><label for="f-purchased">Bought on</label><input id="f-purchased" name="purchased" type="date"></div>
-        </div>
-        <div class="grid2" data-for="cellar">
-          <div class="field"><label for="f-arrival">Collect or delivery</label>
-            <select id="f-arrival" name="arrival"><option value="">Not set</option><option>Collect</option><option>Delivery</option></select></div>
-          <div class="field"><label for="f-collect">Due by</label><input id="f-collect" name="collectBy" type="date"></div>
         </div>
         <div class="field"><label for="f-notes">Notes</label><textarea id="f-notes" name="notes"></textarea></div>
         <label class="check" for="f-hidden"><input id="f-hidden" name="hidden" type="checkbox">
@@ -118,8 +119,12 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h3l2-2.5h6L17 7h3a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.6"/></svg>
           <span class="sr-only">Take or choose a photo</span>
         </label>
-        <input id="ai-photo" type="file" accept="image/*" hidden>
+        <input id="ai-photo" class="sr-only" type="file" accept="image/*">
         <button type="button" class="btn primary" id="ai-go">Fill in</button>
+      </div>
+      <div class="ai-thumb" id="ai-thumb" hidden>
+        <img alt="The photo you chose">
+        <button type="button" class="btn" id="ai-unphoto">Remove photo</button>
       </div>
       <p class="ai-status" id="ai-status" role="status"></p>
     </div>
