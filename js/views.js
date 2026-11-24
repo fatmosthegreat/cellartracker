@@ -52,9 +52,11 @@ export function statsHTML(state) {
   ].join("");
 }
 
-/** "When to open": each cellar bottle's drinking window on a shared year axis, with a line for today. */
+/** "When to open": each cellar bottle's drinking window on a shared year axis, with a line for today.
+ *  Bottles on order are left out: they can't be opened until they arrive. */
 export function timelineHTML(cellar, now = new Date(), lists = FALLBACK_LISTS) {
   const rows = cellar
+    .filter(w => w.status !== "On order")
     .map(w => ({ w, win: parseWindow(w.window) }))
     .filter(r => r.win)
     .sort((a, b) => a.win.from - b.win.from || a.win.to - b.win.to);
@@ -195,13 +197,16 @@ function entryHTML(w, source, owner, lists) {
     if (w.consumedOn) meta.push(`<span>Consumed ${esc(formatDate(w.consumedOn))}</span>`);
     if (hasRating(w)) meta.push(`<span class="rating">${esc(w.rating)}<small>/10</small></span>`);
   } else {
-    if (w.window) meta.push(`<span>Drink ${esc(w.window)}</span>`);
-    const ws = windowState(w.window);
-    if (ws) meta.push(`<span class="pill ${ws.key}">${ws.label}</span>`);
+    // A bottle on order shows no drinking window until it arrives (it's still saved, and shows then).
+    if (w.status !== "On order") {
+      if (w.window) meta.push(`<span>Drink ${esc(w.window)}</span>`);
+      const ws = windowState(w.window);
+      if (ws) meta.push(`<span class="pill ${ws.key}">${ws.label}</span>`);
+    }
     if (w.storage) meta.push(`<span>${esc(w.storage)}</span>`);
     if (w.status === "On order") {
       const due = { Collect: "Collect by", Delivery: "Delivery by" }[w.arrival] || "Due";
-      if (w.collectBy) meta.push(`<span>${due} ${esc(formatDate(w.collectBy))}</span>`);
+      if (w.collectBy) meta.push(`<span>${due} ${esc(formatDate(w.collectBy))}${w.collectTime ? `, ${esc(w.collectTime)}` : ""}</span>`);
       else if (w.arrival) meta.push(`<span>${esc(w.arrival)}</span>`);
     }
   }

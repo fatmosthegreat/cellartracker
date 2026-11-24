@@ -406,7 +406,7 @@ test('/cellar is one line per wine; every list has its title right above the fir
   assert.match(text, /\n\n<b>On order<\/b> · 1 bottle\n1x 2023 A F Gros Moulin-à-Vent$/);
   assert.doesNotMatch(text, /drink 20/, 'no drinking windows in /cellar');
   assert.match(sent(say('pinot')), /<\/b>\n<b>20\d\d<\/b>[^\n]*\n\n<b>20\d\d<\/b>/);
-  assert.match(sent(say('/onorder')), /<b>On order<\/b>\n<b>2023<\/b> A F Gros/);
+  assert.match(sent(say('/incoming')), /<b>On order<\/b>\n<b>2023<\/b> A F Gros/);
 });
 
 test('one search rule: producer, wine, region, grape, colour, vintage, never notes', () => {
@@ -461,11 +461,23 @@ test('/value lists each wine with its price and the total last; searches; owner-
   const duroche = ok('list').cellar.find(w => w.producer === 'Duroche');
   ok('update', { id: duroche.id, wine: { price: null } });
   const red = sent(say('/value pinot 2018'));
-  assert.match(red, /^<b>Value of “pinot 2018”<\/b>\n/);
+  assert.match(red, /^<b>Cellar value: “pinot 2018”<\/b>\n/);
   assert.match(red, /2x 2018 Jadot Gevrey-Chambertin · S\$280 \(S\$140 each\)/);
   assert.match(red, /1x 2018 Duroche Vosne-Romanée · no price/);
   assert.match(red, /<b>Total: S\$280<\/b> · 2 bottles \(1 without a price, not counted\)$/);
   assert.match(sent(say('/value champagne')), /Nothing in the cellar matches “champagne”/);
+
+  // The bottles you've opened, with or without a search.
+  const leflaive = ok('list').cellar.find(w => w.producer === 'Leflaive');
+  ok('drink', { id: leflaive.id });
+  const drunk = sent(say('/value consumed'));
+  assert.match(drunk, /^<b>Opened bottles<\/b>\n/);
+  assert.match(drunk, /1x 2024 Penfolds Bin 128 · S\$88/);
+  assert.match(drunk, /<b>Total: S\$238<\/b> · 2 bottles$/);
+  assert.doesNotMatch(drunk, /Jadot/, 'not the cellar');
+  const chard = sent(say('/value Opened chardonnay'));
+  assert.match(chard, /^<b>Opened bottles: “chardonnay”<\/b>\n1x 2022 Leflaive Bourgogne Blanc · S\$150\n\n<b>Total: S\$150<\/b> · 1 bottle$/);
+  assert.match(sent(say('/value consumed pinot noir')), /Nothing you've opened matches “pinot noir”/);
 
   gas.PropertiesService.getScriptProperties().setProperties({ TELEGRAM_GUESTS: JSON.stringify([{ id: '555', name: 'Sam' }]) });
   const guest = sent(say('/value', '555'));
@@ -486,10 +498,26 @@ test('/search is off the menu but still works; /value and /notes are only on the
   assert.ok(!names(everyone).includes('value') && !names(everyone).includes('notes'));
 });
 
-test('/stats, /onorder and /help answer', () => {
+test('bottles on order show no drinking window, and aren\'t in /ready, /closing or window reminders', () => {
+  const { say, sent, ok, backend } = freshBot();
+  const gros = ok('list').cellar.find(w => w.producer === 'A F Gros');
+  assert.equal(gros.window, '2025–2029');
+  assert.doesNotMatch(sent(say('/incoming')), /drink 20/);
+  assert.doesNotMatch(sent(say('gros')), /drink 20/);
+  assert.doesNotMatch(sent(say('/ready')), /Gros/);
+  ok('update', { id: gros.id, wine: { window: '2025–2026' } });
+  assert.doesNotMatch(sent(say('/closing')), /Gros/);
+  const due = backend.remindersDue_(ok('list').cellar, '2026-11-24', {}, { closeReminderMonths: 6, nudgeDay: 'none' });
+  assert.ok(!due.some(d => /\|(open|close)\|/.test(d.key) && d.key.startsWith(gros.id)));
+  ok('arrived', { id: gros.id });
+  assert.match(sent(say('/closing')), /Gros · <i>Moulin-à-Vent<\/i> · drink 2025–2026/, 'once it arrives, it counts');
+});
+
+test('/stats, /incoming (and the old /onorder) and /help answer', () => {
   const { say, sent } = freshBot();
   assert.match(sent(say('/stats')), /<b>4<\/b> in the cellar\n<b>1<\/b> on order\n<b>1<\/b> consumed\n<b>S\$809<\/b> on the shelf/);
-  assert.match(sent(say('/onorder')), /A F Gros[\s\S]*Grand Cru, collect Fri 27 Nov/);
+  assert.match(sent(say('/onorder')), /A F Gros/, 'the old name still works');
+  assert.match(sent(say('/incoming')), /A F Gros[\s\S]*Grand Cru, collect Fri 27 Nov/);
   assert.match(sent(say('/help')), /\/opened[\s\S]*Tips[\s\S]*price 150/);
 });
 
@@ -786,8 +814,12 @@ test('a label photo becomes a draft with one Claude call, and ✅ Add puts it in
 
   const draft = c.draft(calls);
   assert.match(draft.text, /2019<\/b> Domaine Duroché · <i>Gevrey-Chambertin 1er Cru Lavaut St-Jacques/);
-  assert.match(draft.text, /No drinking window yet[\s\S]*Reply to this message with the drinking window/);
-  assert.deepEqual(Object.keys(draft.buttons), ['Add', 'Fix', 'Collect', 'Delivery', 'Retry', 'Cancel']);
+  // Every field, the empty ones marked, and nothing asked: you reply with what to change.
+  assert.match(draft.text, /<\/i>\n\n🎨 Colour: Red\n🍇 Grape: Pinot Noir\n🗺️ Region: Burgundy\n🗓️ Window: \n💰 Price: \n📝 Notes: Bought at Wine Co\n\nTap ✅ to add it\. To change something, reply with it/);
+  assert.doesNotMatch(draft.text, /On order|Arrival|Due|Time/, 'order fields only on orders');
+  assert.equal(c.calls(calls, 'sendMessage').filter(m => m.payload.reply_markup && m.payload.reply_markup.force_reply).length, 0,
+    'no drinking-window question');
+  assert.deepEqual(Object.keys(draft.buttons), ['Add', 'Fix', 'Retry', 'Cancel'], 'no order buttons: /order is for orders');
   assert.equal(draft.labels.Retry, '🔁 Retry with Sonnet');
   assert.equal(c.ok('list').cellar.length, 5, 'nothing is added before you tap');
 
@@ -795,7 +827,7 @@ test('a label photo becomes a draft with one Claude call, and ✅ Add puts it in
   const typed = c.reply(draft.messageId, '2027-2040');
   assert.equal(c.calls(typed, 'anthropic').length, 0);
   const withWindow = c.draft(typed);
-  assert.match(withWindow.text, /Drink 2027–2040/);
+  assert.match(withWindow.text, /🗓️ Window: 2027–2040\n/);
 
   assert.match(c.sent(c.press(withWindow.buttons.Add, withWindow.messageId)), /Added .*Duroché/);
   const added = c.byName(c.ok('list').cellar, 'Domaine Duroché')[0];
@@ -825,15 +857,15 @@ test('changes to a draft are parsed in code, never sent to Claude; Retry keeps t
 
   // Several fields in one message, separated by commas or " / ", with friendly names.
   const many = c.draft(c.reply(fixed.messageId, 'price 150, drinking window 2026-2034 / color white'));
-  assert.match(many.text, /<b>2018<\/b>[\s\S]*Burgundy · Pinot Noir · White\nDrink 2026–2034\nPrice S\$150/);
+  assert.match(many.text, /<b>2018<\/b>[\s\S]*Colour: White\n🍇 Grape: Pinot Noir\n🗺️ Region: Burgundy\n🗓️ Window: 2026–2034\n💰 Price: S\$150/);
   // A comma that isn't followed by a field stays in the value.
   const noted = c.draft(c.reply(many.messageId, 'note: magnum, from the auction'));
-  assert.match(noted.text, /Note: magnum, from the auction/);
+  assert.match(noted.text, /Notes: magnum, from the auction/);
 
   // ✏️ asks what to change; answering that question works too.
   c.press(noted.buttons.Fix, noted.messageId);
   const windowed = c.draft(c.reply(c.lastMessageId(), 'drink 2030 to 2045'));
-  assert.match(windowed.text, /Drink 2030–2045\n/);
+  assert.match(windowed.text, /Window: 2030–2045\n/);
 
   // Something it can't parse changes nothing, says so, and costs nothing.
   const vague = c.reply(windowed.messageId, 'it is actually the 2017');
@@ -849,7 +881,7 @@ test('changes to a draft are parsed in code, never sent to Claude; Retry keeps t
   assert.equal(again.payload.fallbacks, 'default');
   assert.equal(again.headers['anthropic-beta'], 'server-side-fallback-2026-07-01');
   const afterRetry = c.draft(retried);
-  assert.match(afterRetry.text, /<b>2019<\/b>[\s\S]*Drink 2030–2045/);
+  assert.match(afterRetry.text, /<b>2019<\/b>[\s\S]*Window: 2030–2045/);
   assert.equal(afterRetry.labels.Retry, '🔁 Retry', 'already read by Sonnet');
 });
 
@@ -857,9 +889,9 @@ test('a window, date or "field: value" typed without replying goes to the newest
   const c = labelBot();
   const first = c.draft(c.photo());
   const loose = c.post({ update_id: 5000, message: { message_id: 4999, chat: { id: Number(CHAT) }, text: '2027-2040' } });
-  assert.match(c.draft(loose).text, /Drink 2027–2040/);
+  assert.match(c.draft(loose).text, /Window: 2027–2040/);
   const priced = c.post({ update_id: 5001, message: { message_id: 5002, chat: { id: Number(CHAT) }, text: 'price: 80' } });
-  assert.match(c.draft(priced).text, /Price S\$80/);
+  assert.match(c.draft(priced).text, /Price: S\$80/);
   const search = c.post({ update_id: 5003, message: { message_id: 5004, chat: { id: Number(CHAT) }, text: 'jadot' } });
   assert.match(c.sent(search), /Jadot/);
   assert.equal(c.calls(search, 'deleteMessage').length, 0, 'a search leaves the draft alone');
@@ -880,11 +912,11 @@ test('✏️ Fix sends the whole row; the edited row comes back with no Claude c
     'colour: Red\ngrape: Pinot Noir\nwindow: 2027-2040\nnotes: magnum');
   assert.equal(c.calls(edited, 'anthropic').length, 0, 'no Claude call');
   const draft = c.draft(edited);
-  assert.match(draft.text, /<b>2018<\/b> Domaine Duroché · <i>Gevrey-Chambertin<\/i>\nBurgundy · Pinot Noir · Red\nDrink 2027–2040\nNote: magnum/);
+  assert.match(draft.text, /<b>2018<\/b> Domaine Duroché · <i>Gevrey-Chambertin<\/i>\n\n🎨 Colour: Red[\s\S]*🗓️ Window: 2027–2040\n💰 Price: \n📝 Notes: magnum/);
 
   // One line is enough; other fields stay as they are.
   const one = c.draft(c.reply(draft.messageId, 'Color: White'));
-  assert.match(one.text, /<b>2018<\/b>[\s\S]*Burgundy · Pinot Noir · White\nDrink 2027–2040/);
+  assert.match(one.text, /<b>2018<\/b>[\s\S]*Colour: White[\s\S]*Window: 2027–2040/);
 
   // Mistakes are explained, and the draft is unchanged.
   assert.match(c.sent(c.reply(one.messageId, 'vintage: 2018\ncork: natural')), /"cork: natural" isn't a field/);
@@ -896,7 +928,7 @@ test('✏️ Fix sends the whole row; the edited row comes back with no Claude c
   assert.deepEqual([added.wine, added.vintage, added.colour, added.window, added.notes], ['Gevrey-Chambertin', 2018, 'White', '2027–2040', 'magnum']);
 });
 
-test('/add looks a wine up by name with Haiku, asks for the window, and works like a photo draft', () => {
+test('/add looks a wine up by name with Haiku, and works like a photo draft', () => {
   const c = labelBot();
   c.answers.label = { readable: true, producer: 'Domaine Leflaive', wine: 'Bourgogne Blanc', cuvee: '',
     vintage: '2022', colour: 'White', grape: 'Chardonnay', region: 'Burgundy' };
@@ -909,18 +941,16 @@ test('/add looks a wine up by name with Haiku, asks for the window, and works li
   assert.deepEqual(read.payload.messages[0].content, [{ type: 'text', text: 'The owner typed: <owner_text>levlaie bogogne blanc 2022</owner_text>' }]);
 
   const draft = c.draft(calls);
-  assert.match(draft.text, /<b>2022<\/b> Domaine Leflaive · <i>Bourgogne Blanc<\/i>\nBurgundy · Chardonnay · White\nNo drinking window yet/);
-  assert.deepEqual(Object.keys(draft.buttons), ['Add', 'Fix', 'Collect', 'Delivery', 'Retry', 'Cancel']);
+  assert.match(draft.text, /<b>2022<\/b> Domaine Leflaive · <i>Bourgogne Blanc<\/i>\n\n🎨 Colour: White\n🍇 Grape: Chardonnay\n🗺️ Region: Burgundy\n🗓️ Window: /);
+  assert.deepEqual(Object.keys(draft.buttons), ['Add', 'Fix', 'Retry', 'Cancel'], 'no order buttons: /order is for orders');
   assert.equal(draft.labels.Retry, '🔁 Retry with Sonnet');
 
-  // Then it asks for the window; answering that question is free.
-  const ask = c.calls(calls, 'sendMessage').at(-1);
-  assert.match(ask.payload.text, /What's the drinking window/);
-  assert.equal(ask.payload.reply_markup.force_reply, true);
-  const windowed = c.reply(c.lastMessageId(), '2024-2030');
+  // Nothing is asked; replying to the draft with the window is free.
+  assert.equal(c.calls(calls, 'sendMessage').filter(m => m.payload.reply_markup && m.payload.reply_markup.force_reply).length, 0);
+  const windowed = c.reply(draft.messageId, '2024-2030');
   assert.equal(c.calls(windowed, 'anthropic').length, 0);
   const withWindow = c.draft(windowed);
-  assert.match(withWindow.text, /Drink 2024–2030/);
+  assert.match(withWindow.text, /🗓️ Window: 2024–2030\n/);
 
   // ✏️ Fix sends the whole row, as for a photo; an edited row is applied with no Claude call.
   const fix = c.calls(c.press(withWindow.buttons.Fix, withWindow.messageId), 'sendMessage')[0];
@@ -929,7 +959,7 @@ test('/add looks a wine up by name with Haiku, asks for the window, and works li
   const edited = c.reply(c.lastMessageId(), 'cuvee: Les Sétilles');
   assert.equal(c.calls(edited, 'anthropic').length, 0);
   const fixed = c.draft(edited);
-  assert.match(fixed.text, /Bourgogne Blanc Les Sétilles[\s\S]*Drink 2024–2030/);
+  assert.match(fixed.text, /Bourgogne Blanc Les Sétilles[\s\S]*Window: 2024–2030/);
 
   // 🔁 Retry rereads the same typed text with Sonnet, keeps the window and doesn't ask again.
   const retried = c.press(fixed.buttons.Retry, fixed.messageId);
@@ -937,56 +967,71 @@ test('/add looks a wine up by name with Haiku, asks for the window, and works li
   assert.equal(again.payload.model, 'claude-sonnet-5-5');
   assert.match(again.payload.messages[0].content[0].text, /levlaie bogogne blanc 2022/);
   assert.equal(c.calls(retried, 'getFile').length, 0);
-  assert.equal(c.calls(retried, 'sendMessage').length, 0, 'no second window question');
+  assert.equal(c.calls(retried, 'sendMessage').length, 0, 'nothing is asked');
   const afterRetry = c.draft(retried);
-  assert.match(afterRetry.text, /Drink 2024–2030/);
+  assert.match(afterRetry.text, /Window: 2024–2030/);
 
   assert.match(c.sent(c.press(afterRetry.buttons.Add, afterRetry.messageId)), /Added .*Leflaive/);
   const added = c.byName(c.ok('list').cellar, 'Domaine Leflaive').find(w => w.vintage === 2022);
   assert.deepEqual([added.wine, added.colour, added.grape, added.window], ['Bourgogne Blanc', 'White', 'Chardonnay', '2024–2030']);
 });
 
-test('/add stays in the cellar unless 🚚 Order · delivery is tapped; then the due date is asked, and it adds as on order', () => {
+test('/order adds a bottle on order: collect or delivery, then the due date, no window question', () => {
   const c = labelBot();
   c.answers.label = { readable: true, producer: 'Domaine Rousseau', wine: 'Gevrey-Chambertin', cuvee: '',
     vintage: '2019', colour: 'Red', grape: 'Pinot Noir' };
-  const calls = c.say('/add rouseau gevrey 2019');
+  const calls = c.say('/order rouseau gevrey 2019 / 150');
   assert.equal(c.calls(calls, 'anthropic').length, 1);
+  assert.match(c.calls(calls, 'anthropic')[0].payload.messages[0].content[0].text, /<owner_text>rouseau gevrey 2019<\/owner_text>/);
   const draft = c.draft(calls);
-  assert.doesNotMatch(draft.text, /On order\n/);
-  assert.match(draft.text, /On order\? Tap 📦 or 🚚/);
-  assert.equal(draft.labels.Delivery, '🚚 Order · delivery');
-  assert.match(c.calls(calls, 'sendMessage').at(-1).payload.text, /What's the drinking window/, 'the window is asked as usual');
+  assert.match(draft.text, /<\/i>\n📦 <u>On order<\/u>\n\n/);
+  assert.match(draft.text, /💰 Price: S\$150/);
+  assert.match(draft.text, /📦 Arrival: \n📅 Due: \n🕒 Time: /);
+  assert.doesNotMatch(draft.text, /drinking window/, 'no window line or question for an order');
+  assert.match(draft.text, /Collecting it or having it delivered\? Tap 📦 or 🚚/);
+  assert.deepEqual(Object.keys(draft.buttons), ['Add', 'Fix', 'Collect', 'Delivery', 'Retry', 'Cancel']);
+  assert.equal(draft.labels.Delivery, '🚚 Delivery');
+  assert.doesNotMatch(c.calls(calls, 'sendMessage').at(-1).payload.text, /What's the drinking window/);
 
-  // One tap makes it an order, by delivery: the order buttons go, and the due date is asked for.
+  // One tap says how it arrives: the buttons go, and the due date is asked for.
   const tapped = c.press(draft.buttons.Delivery, draft.messageId);
   assert.equal(c.calls(tapped, 'anthropic').length, 0);
   const shown = c.draft(tapped);
-  assert.match(shown.text, /📦 On order · Delivery\n/);
+  assert.match(shown.text, /🚚 Arrival: Delivery\n/);
   assert.deepEqual(Object.keys(shown.buttons), ['Add', 'Fix', 'Retry', 'Cancel']);
   const ask = c.calls(tapped, 'sendMessage').at(-1);
   assert.match(ask.payload.text, /When does it arrive\?/);
   assert.equal(ask.payload.reply_markup.force_reply, true);
 
-  // The date is free; the window can still be replied to the draft.
-  const dated = c.reply(c.lastMessageId(), '2026-12-05');
-  assert.equal(c.calls(dated, 'anthropic').length, 0);
-  const withDate = c.draft(dated);
-  assert.match(withDate.text, /On order · Delivery · due 5 Dec 2026/);
+  // The date (and a time with it) is free; a window can still be sent, and is kept for when it arrives.
+  const withDate = c.draft(c.reply(c.lastMessageId(), '2026-12-05 3pm'));
+  assert.match(withDate.text, /📅 Due: 5 Dec 2026\n🕒 Time: 15:00/);
   const windowed = c.draft(c.reply(withDate.messageId, '2027-2040'));
-  assert.match(windowed.text, /Drink 2027–2040/);
+  assert.match(windowed.text, /Window: 2027–2040 <i>\(shows once it arrives\)<\/i>/);
 
   // ✏️ Fix includes status, arrival and due for an order, and they can be changed.
   const fix = c.calls(c.press(windowed.buttons.Fix, windowed.messageId), 'sendMessage')[0];
-  assert.match(fix.payload.text, /notes: \nprice: \nstatus: On order\narrival: Delivery\ndue: 2026-12-05<\/pre>/);
-  const changed = c.draft(c.reply(c.lastMessageId(), 'arrival: collect\ndue: 2026-12-09'));
-  assert.match(changed.text, /On order · Collect · due 9 Dec 2026/);
+  assert.match(fix.payload.text, /notes: \nprice: 150\nstatus: On order\narrival: Delivery\ndue: 2026-12-05\ntime: 15:00<\/pre>/);
+  const changed = c.draft(c.reply(c.lastMessageId(), 'arrival: collect\ndue: 2026-12-09\ntime: 9:30am'));
+  assert.match(changed.text, /📦 Arrival: Collect\n📅 Due: 9 Dec 2026\n🕒 Time: 09:30/);
+  assert.match(c.sent(c.reply(changed.messageId, 'due: 2020-01-01')), /1 Jan 2020 has already passed/);
+  assert.match(c.sent(c.reply(changed.messageId, '2020-01-01')), /1 Jan 2020 has already passed/);
+  assert.match(c.sent(c.reply(changed.messageId, 'time: 25pm')), /time should look like 3pm or 15:00/);
   assert.match(c.sent(c.reply(changed.messageId, 'arrival: post')), /arrival should be one of: Collect, Delivery/);
   assert.match(c.sent(c.reply(changed.messageId, 'due: soon')), /due date should look like/);
 
   assert.match(c.sent(c.press(changed.buttons.Add, changed.messageId)), /Added .*Rousseau.* as on order/);
   const added = c.byName(c.ok('list').cellar, 'Domaine Rousseau')[0];
-  assert.deepEqual([added.status, added.arrival, added.collectBy, added.window], ['On order', 'Collect', '2026-12-09', '2027–2040']);
+  assert.deepEqual([added.status, added.arrival, added.collectBy, added.collectTime, added.window, added.price],
+    ['On order', 'Collect', '2026-12-09', '09:30', '2027–2040', 150]);
+});
+
+test('/add always goes to the cellar', () => {
+  const c = labelBot();
+  const draft = c.draft(c.say('/add duroche gevrey 2019'));
+  assert.doesNotMatch(draft.text, /On order|📦|🚚/);
+  assert.match(c.sent(c.press(draft.buttons.Add, draft.messageId)), /to the cellar/);
+  assert.equal(c.byName(c.ok('list').cellar, 'Domaine Duroché')[0].status, 'In cellar');
 });
 
 test('a price after " /" in /add goes on the draft, not to Claude; photo captions stay notes', () => {
@@ -997,7 +1042,7 @@ test('a price after " /" in /add goes on the draft, not to Claude; photo caption
   assert.deepEqual(c.calls(calls, 'anthropic')[0].payload.messages[0].content,
     [{ type: 'text', text: 'The owner typed: <owner_text>2019 rousseau gevrey</owner_text>' }]);
   const draft = c.draft(calls);
-  assert.match(draft.text, /Price S\$1,200/);
+  assert.match(draft.text, /Price: S\$1,200/);
 
   // ✏️ Fix shows it, and a row reply changes it with no Claude call; a bad one is refused.
   const fix = c.calls(c.press(draft.buttons.Fix, draft.messageId), 'sendMessage')[0];
@@ -1005,7 +1050,7 @@ test('a price after " /" in /add goes on the draft, not to Claude; photo caption
   const changed = c.reply(c.lastMessageId(), 'price: 95');
   assert.equal(c.calls(changed, 'anthropic').length, 0);
   const now = c.draft(changed);
-  assert.match(now.text, /Price S\$95/);
+  assert.match(now.text, /Price: S\$95/);
   assert.match(c.sent(c.reply(now.messageId, 'price: lots')), /Price must be a number/);
 
   assert.match(c.sent(c.press(now.buttons.Add, now.messageId)), /Added/);
@@ -1013,8 +1058,8 @@ test('a price after " /" in /add goes on the draft, not to Claude; photo caption
 
   // A photo caption stays a plain note: no price is taken from it.
   const photo = c.draft(c.photo('Bought at Wine Co / 90'));
-  assert.doesNotMatch(photo.text, /Price/);
-  assert.match(photo.text, /Note: Bought at Wine Co \/ 90/);
+  assert.match(photo.text, /💰 Price: /);
+  assert.match(photo.text, /📝 Notes: Bought at Wine Co \/ 90/);
 });
 
 test('a bad price in /add is refused before Claude, and a price alone needs a wine', () => {
@@ -1042,6 +1087,53 @@ test('due dates: ISO, day/month and month names, the next one when the year is l
   assert.equal(due('vintage 2019'), '');
 });
 
+test('due dates: today, tomorrow, in N days, weekdays; a time after the date; times on their own', () => {
+  const { backend } = freshCellar();
+  const due = t => backend.dueDate_(t, '2026-11-23');  // a Monday
+  assert.equal(due('today'), '2026-11-23');
+  assert.equal(due('Tomorrow'), '2026-11-24');
+  assert.equal(due('in 3 days'), '2026-11-26');
+  assert.equal(due('in 1 day'), '2026-11-24');
+  assert.equal(due('friday'), '2026-11-27');
+  assert.equal(due('this Fri'), '2026-11-27');
+  assert.equal(due('next friday'), '2026-12-04', 'the Friday of next week');
+  assert.equal(due('monday'), '2026-11-23', 'today, when it is Monday');
+  assert.equal(due('next monday'), '2026-11-30');
+  assert.equal(due('sunday'), '2026-11-29');
+  assert.equal(due('next sunday'), '2026-12-06');
+  assert.equal(due('december'), '', 'a month alone is not a date');
+  assert.equal(due('fr'), '', 'too short to be a day');
+
+  const at = t => backend.dueWithTime_(t, '2026-11-23');
+  assert.deepEqual(at('5 Dec 3pm'), { date: '2026-12-05', time: '15:00' });
+  assert.deepEqual(at('friday at 15:30'), { date: '2026-11-27', time: '15:30' });
+  assert.deepEqual(at('tomorrow, 9am'), { date: '2026-11-24', time: '09:00' });
+  assert.deepEqual(at('5/12'), { date: '2026-12-05', time: '' });
+  assert.equal(at('3pm'), null, 'a time alone is not a due date');
+  assert.equal(at('jadot'), null);
+
+  const time = backend.timeOf_;
+  assert.equal(time('3pm'), '15:00');
+  assert.equal(time('9:05 am'), '09:05');
+  assert.equal(time('12am'), '00:00');
+  assert.equal(time('12pm'), '12:00');
+  assert.equal(time('15:00'), '15:00');
+  assert.equal(time('15'), '', 'a bare number is not a time');
+  assert.equal(time('13pm'), '');
+  assert.equal(time('25:00'), '');
+});
+
+test('order times: saved from the website, shown in /incoming and the collect reminders', () => {
+  const { ok, owner, backend, say, sent } = freshBot();
+  const gros = ok('list').cellar.find(w => w.producer === 'A F Gros');
+  ok('update', { id: gros.id, wine: { collectBy: '2026-11-24', collectTime: '3pm' } });
+  assert.equal(ok('list').cellar.find(w => w.id === gros.id).collectTime, '15:00');
+  assert.match(String(owner('update', { id: gros.id, wine: { collectTime: 'soon' } }).error), /Time must be a time like 15:00 or 3pm/);
+  assert.match(sent(say('/incoming')), /Collect by 24 Nov 2026, 15:00/);
+  const due = backend.remindersDue_(ok('list').cellar, '2026-11-23', {}, { closeReminderMonths: 6, nudgeDay: 'none' });
+  assert.match(due.find(d => d.key.startsWith(gros.id)).text, /Collect tomorrow, 15:00/);
+});
+
 test('/add needs a name, is owner-only, and a wine it can\'t place gets Retry or Cancel only', () => {
   const c = labelBot();
   c.gas.PropertiesService.getScriptProperties().setProperties({ TELEGRAM_GUESTS: JSON.stringify([{ id: '555', name: 'Sam' }]) });
@@ -1051,8 +1143,11 @@ test('/add needs a name, is owner-only, and a wine it can\'t place gets Retry or
   const guest = c.say('/add rousseau gevrey 2019', '555');
   assert.match(c.sent(guest), /Only the owner/);
   assert.equal(c.calls(guest, 'anthropic').length, 0);
-  assert.match(c.sent(c.say('/help')), /\/add · Add a wine, e\.g\. \/add 2019 rousseau gevrey \/ 150/);
-  assert.doesNotMatch(c.sent(c.say('/help', '555')), /\/add /);
+  assert.match(c.sent(c.say('/help')), /\/add · Add a wine to the cellar, e\.g\. \/add 2019 rousseau gevrey \/ 150/);
+  assert.match(c.sent(c.say('/help')), /\/order · Add a wine you've ordered/);
+  assert.doesNotMatch(c.sent(c.say('/help', '555')), /\/add |\/order /);
+  assert.match(c.sent(c.say('/order rousseau gevrey 2019', '555')), /Only the owner can use \/order/);
+  assert.match(c.sent(c.say('/order')), /Type the wine after \/order/);
 
   c.answers.label = { readable: false, producer: '', wine: '', cuvee: '', vintage: '', colour: '', grape: '' };
   const unknown = c.say('/add zzqx');
@@ -1062,12 +1157,13 @@ test('/add needs a name, is owner-only, and a wine it can\'t place gets Retry or
   assert.doesNotMatch(c.sent(unknown), /drinking window/, 'no window question for a wine it couldn\'t place');
 });
 
-test('a photo draft is followed by the window question too', () => {
+test('no draft asks for the drinking window; it is replied like any other change', () => {
   const c = labelBot();
   const calls = c.photo();
-  assert.match(c.calls(calls, 'sendMessage').at(-1).payload.text, /What's the drinking window/);
-  const windowed = c.draft(c.reply(c.lastMessageId(), 'drink 2027 to 2040'));
-  assert.match(windowed.text, /Drink 2027–2040/);
+  assert.ok(!c.calls(calls, 'sendMessage').some(m => /drinking window\?/.test(m.payload.text)));
+  const draft = c.draft(calls);
+  const windowed = c.draft(c.reply(draft.messageId, 'drink 2027 to 2040'));
+  assert.match(windowed.text, /Window: 2027–2040/);
 });
 
 test('the website\'s ✨ identify uses the same AI code, for the owner only, and checks what the browser sends', () => {

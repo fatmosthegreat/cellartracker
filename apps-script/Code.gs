@@ -27,11 +27,11 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-24.9';
+const BUILD = '2026-11-24.14';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
-    'storage', 'price', 'purchased', 'notes', 'hidden', 'created', 'updated', 'collectBy', 'arrival', 'region'],
+    'storage', 'price', 'purchased', 'notes', 'hidden', 'created', 'updated', 'collectBy', 'arrival', 'region', 'collectTime'],
   Consumed: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'price', 'purchased',
     'consumedOn', 'rating', 'notes', 'hidden', 'created', 'updated', 'region'],
 };
@@ -47,6 +47,7 @@ const FIELD_RULES = {
   purchased: { type: 'date', label: 'Bought on' },
   consumedOn: { type: 'date', label: 'Consumed on' },
   collectBy: { type: 'date', label: 'Due by' },
+  collectTime: { type: 'time', label: 'Time' },  // "15:00", apart from collectBy so the reminders still compare plain dates
   status: { type: 'enum', values: ['In cellar', 'On order'], label: 'Status' },
   arrival: { type: 'enum', values: ['Collect', 'Delivery'], label: 'Collect or delivery' },
   hidden: { type: 'bool' },
@@ -416,6 +417,11 @@ function cleanValue_(field, value) {
       throw new Error(rule.label + ' must be ' + (whole ? 'a whole number' : 'a number') + ' from ' + rule.min + ' to ' + rule.max + '.');
     }
     return n;
+  }
+  if (rule.type === 'time') {
+    const t = timeOf_(s);
+    if (!t) throw new Error(rule.label + ' must be a time like 15:00 or 3pm.');
+    return t;
   }
   if (rule.type === 'date' && !/^\d{4}-\d{2}-\d{2}$/.test(s)) throw new Error(rule.label + ' must be a date like 2026-11-27.');
   if (rule.type === 'enum' && rule.values.indexOf(s) < 0) throw new Error(rule.label + ' must be one of: ' + rule.values.join(', ') + '.');
@@ -1030,7 +1036,8 @@ function remindersDue_(recs, today, sent, settings) {
   const out = [];
   const add = function (key, text) { if (!(key in sent)) out.push({ key: key, text: text }); };
   sortCellar_(recs).forEach(function (w) {
-    const win = parseWindow_(w.window);
+    // Drinking windows only matter once a bottle is here: an order can't be opened yet.
+    const win = w.status === 'In cellar' ? parseWindow_(w.window) : null;
     if (win && year === win.from) {
       add(w.id + '|open|' + win.from, '🍷 <b>Ready to drink</b> from this year\n' + bottleLine_(w));
     }
@@ -1040,10 +1047,11 @@ function remindersDue_(recs, today, sent, settings) {
     if (w.status !== 'On order') return;
     const say = arrival_(w);
     const where = w.storage ? '\n' + escH_(w.storage) : '';
+    const at = w.collectTime ? ', ' + escH_(w.collectTime) : '';
     if (w.collectBy === tomorrow) {
-      add(w.id + '|collect|' + w.collectBy + '|before', '📦 <b>' + say.tomorrow + '</b>\n' + bottleLine_(w) + where);
+      add(w.id + '|collect|' + w.collectBy + '|before', '📦 <b>' + say.tomorrow + at + '</b>\n' + bottleLine_(w) + where);
     } else if (w.collectBy === today) {
-      add(w.id + '|collect|' + w.collectBy + '|day', '📦 <b>' + say.today + '</b>\n' + bottleLine_(w) + where);
+      add(w.id + '|collect|' + w.collectBy + '|day', '📦 <b>' + say.today + at + '</b>\n' + bottleLine_(w) + where);
     } else if (nudgeToday && (!w.collectBy || w.collectBy < today)) {
       const late = w.collectBy ? ' (was due ' + niceDate_(w.collectBy) + ')' : '';
       add(w.id + '|nudge|' + today, '📦 <b>' + say.waiting + '</b>' + late + '\n' + bottleLine_(w) + where);
@@ -1061,21 +1069,21 @@ const TG_COMMANDS = {
   cellar: { menu: true, help: 'Everything in the cellar', run: function (q, recs) { return { text: cellarText_(recs) }; } },
   ready: { menu: true, help: 'In its drinking window now', run: function (q, recs) {
     const year = Number(today_().slice(0, 4));
-    const ready = recs.filter(function (w) { const win = parseWindow_(w.window); return win && win.from <= year && year <= win.to; });
+    const ready = inCellar_(recs).filter(function (w) { const win = parseWindow_(w.window); return win && win.from <= year && year <= win.to; });
     return { text: listText_('Ready to drink', ready, 'Nothing is in its drinking window right now.') };
   } },
   closing: { menu: true, help: 'Windows ending this year or next', run: function (q, recs) {
     const year = Number(today_().slice(0, 4));
-    const soon = recs.filter(function (w) { const win = parseWindow_(w.window); return win && (win.to === year || win.to === year + 1); })
+    const soon = inCellar_(recs).filter(function (w) { const win = parseWindow_(w.window); return win && (win.to === year || win.to === year + 1); })
       .sort(function (a, b) { return parseWindow_(a.window).to - parseWindow_(b.window).to; });
     return { text: listText_('Drink soon', soon, 'No windows end this year or next.', true) };
   } },
-  onorder: { menu: true, help: 'Bottles on order', run: function (q, recs) {
+  incoming: { menu: true, help: 'Bottles on their way', run: function (q, recs) {
     const due = recs.filter(function (w) { return w.status === 'On order'; });
     if (!due.length) return { text: 'Nothing on order.' };
     return { text: '<b>On order</b>\n' + due.map(function (w) {
       const say = arrival_(w);
-      return bottleLine_(w) + (w.collectBy ? '\n' + say.due + ' ' + niceDate_(w.collectBy) : w.arrival ? '\n' + w.arrival : '') +
+      return bottleLine_(w) + (w.collectBy ? '\n' + say.due + ' ' + dueText_(w) : w.arrival ? '\n' + w.arrival : '') +
         (w.storage ? '\n' + escH_(w.storage) : '');
     }).join('\n\n') };
   } },
@@ -1097,8 +1105,12 @@ const TG_COMMANDS = {
     ].join('\n') };
   } },
   // `owner` commands change the cellar or show what only the owner sees, so guests can't use them.
-  value: { menu: true, owner: true, help: 'What the cellar is worth, e.g. /value burgundy', run: function (q, recs) {
-    return { text: valueText_(q ? searchRecs_(recs, q) : recs, q) };
+  // "/value consumed pinot noir" (or "opened") does the same for the bottles you've opened.
+  value: { menu: true, owner: true, help: 'What the cellar is worth, e.g. /value burgundy or /value consumed', run: function (q, recs) {
+    const m = /^(consumed|opened)\b\s*([\s\S]*)$/i.exec(q);
+    const search = m ? m[2] : q;
+    const list = m ? readRows_(table_('Consumed')).map(function (r) { return r.rec; }) : recs;
+    return { text: valueText_(search ? searchRecs_(list, search) : list, search, !!m) };
   } },
   notes: { menu: true, owner: true, help: 'Search your tasting notes, e.g. /notes corked', run: function (q) {
     if (!q) return { text: 'Type what to look for in your tasting notes, e.g. /notes corked' };
@@ -1112,15 +1124,16 @@ const TG_COMMANDS = {
     }).join('\n\n') };
   } },
   opened: { menu: true, owner: true, help: 'Record a bottle you opened', run: function (q, recs) {
-    return pickBottle_('drink', q, recs.filter(function (w) { return w.status === 'In cellar'; }), 'Which one did you open?');
+    return pickBottle_('drink', q, inCellar_(recs), 'Which one did you open?');
   } },
   arrived: { menu: true, owner: true, help: 'Move a bottle on order into the cellar', run: function (q, recs) {
     return pickBottle_('coll', q, recs.filter(function (w) { return w.status === 'On order'; }), 'Which one has arrived?');
   } },
-  add: { menu: true, owner: true, help: 'Add a wine, e.g. /add 2019 rousseau gevrey / 150', run: function (q, recs, guest, chatId) {
-    const p = splitPrice_(q);  // a bad price is refused here, before any Claude call
-    if (!p.text) return { text: 'Type the wine after /add, and the price after a /, e.g. /add 2019 rousseau gevrey / 150' };
-    startDraft_({ typed: p.text, price: p.price }, chatId, '🔍 Looking up the wine…');
+  add: { menu: true, owner: true, help: 'Add a wine to the cellar, e.g. /add 2019 rousseau gevrey / 150', run: function (q, recs, guest, chatId) {
+    return typedDraft_('add', q, chatId, {});
+  } },
+  order: { menu: true, owner: true, help: 'Add a wine you\'ve ordered, e.g. /order 2019 rousseau gevrey / 150', run: function (q, recs, guest, chatId) {
+    return typedDraft_('order', q, chatId, { status: 'On order' });
   } },
   add1: { menu: true, owner: true, help: 'Add another bottle of a wine', run: function (q, recs) {
     return pickBottle_('add1', q, recs, 'Which wine did you buy another bottle of?');
@@ -1130,11 +1143,19 @@ const TG_COMMANDS = {
       '\n\nOr just type a name to search.' +
       (guest ? '' : ' Reminders arrive at ' + lookups_().settings.reminderHour + ':00 when something is due.' +
         '\n📷 Send a photo of a label to add that bottle.' +
-        '\n\n<b>Tips</b>\n/add 2019 rousseau gevrey / 150 adds it with its price.' +
-        '\nOn a draft, send 2028-2040, price 150, vintage 2019 or due 5 Dec. Several at once: vintage 2019, price 150') };
+        '\n\n<b>Tips</b>\n/add 2019 rousseau gevrey / 150 adds it with its price. /order does the same for a bottle on its way.' +
+        '\nOn a draft, send 2028-2040, price 150, vintage 2019 or due friday 3pm. Several at once: vintage 2019, price 150') };
   } },
 };
 TG_COMMANDS.start = { help: '', run: TG_COMMANDS.help.run };
+TG_COMMANDS.onorder = { help: '', run: TG_COMMANDS.incoming.run };  // the old name, off the menu
+
+// /add and /order: the price after " /" is split off (and checked) before Claude sees the text.
+function typedDraft_(cmd, q, chatId, extra) {
+  const p = splitPrice_(q);  // a bad price is refused here, before any Claude call
+  if (!p.text) return { text: 'Type the wine after /' + cmd + ', and the price after a /, e.g. /' + cmd + ' 2019 rousseau gevrey / 150' };
+  startDraft_(Object.assign({ typed: p.text, price: p.price }, extra), chatId, '🔍 Looking up the wine…');
+}
 
 // What tapping a bottle's button does. Each returns the text that replaces the buttons, or
 // { text, buttons } to ask a follow-up question.
@@ -1293,9 +1314,12 @@ function countLine_(w) {
 }
 
 // /value: each wine with what it cost, and the total on the last line. Bottles without a price
-// are listed but left out of the total, and the total says how many.
-function valueText_(recs, q) {
-  if (!recs.length) return q ? 'Nothing in the cellar matches “' + escH_(q) + '”.' : 'The cellar is empty.';
+// are listed but left out of the total, and the total says how many. `opened`: Consumed bottles.
+function valueText_(recs, q, opened) {
+  if (!recs.length) {
+    return opened ? (q ? 'Nothing you\'ve opened matches “' + escH_(q) + '”.' : 'You haven\'t opened anything yet.')
+      : q ? 'Nothing in the cellar matches “' + escH_(q) + '”.' : 'The cellar is empty.';
+  }
   const cur = escH_(lookups_().settings.currency);
   let total = 0, bottles = 0, unpriced = 0;
   const lines = sortCellar_(recs).map(function (w) {
@@ -1305,17 +1329,21 @@ function valueText_(recs, q) {
     return countLine_(w) + ' · ' + (priced ? cur + money_(w.price * n) + (n > 1 ? ' (' + cur + money_(w.price) + ' each)' : '') : 'no price') +
       (w.status === 'On order' ? ' (on order)' : '');
   });
-  return '<b>' + (q ? 'Value of “' + escH_(q) + '”' : 'Cellar value') + '</b>\n' + lines.join('\n\n') +
+  const title = (opened ? 'Opened bottles' : 'Cellar value') + (q ? ': “' + escH_(q) + '”' : '');
+  return '<b>' + title + '</b>\n' + lines.join('\n\n') +
     '\n\n<b>Total: ' + cur + money_(total) + '</b> · ' + bottles + ' bottle' + (bottles === 1 ? '' : 's') +
     (unpriced ? ' (' + unpriced + ' without a price, not counted)' : '');
 }
 
-// "<b>2018</b> Duroche · <i>Vosne-Romanée</i> ×2 · drink 2024–2035"
+// "<b>2018</b> Duroche · <i>Vosne-Romanée</i> ×2 · drink 2024–2035". A bottle on order never shows
+// its drinking window: it can't be opened until it arrives.
 function bottleLine_(w, short) {
   const n = w.bottles || 1;
   return '<b>' + escH_(w.vintage || 'NV') + '</b> ' + escH_(w.producer) + ' · <i>' + escH_(w.wine) + '</i>' +
-    (n > 1 && !short ? ' ×' + n : '') + (w.window && !short ? ' · drink ' + escH_(w.window) : '');
+    (n > 1 && !short ? ' ×' + n : '') + (w.window && !short && w.status !== 'On order' ? ' · drink ' + escH_(w.window) : '');
 }
+
+function inCellar_(recs) { return recs.filter(function (w) { return w.status === 'In cellar'; }); }
 
 // Guests never see hidden bottles, in lists, searches or counts.
 function cellarRecs_(guest) {
@@ -1351,8 +1379,8 @@ function sortCellar_(recs) {
 /* ---------- Label photos: add a bottle from a photo of its label ---------- */
 //
 // Send the bot a photo of a label, or type /add and the wine's name (spelling mistakes are fine).
-// A draft goes to the cellar unless you tap 📦 Order · collect or 🚚 Order · delivery on it; that
-// makes it a bottle on order and asks for the due date.
+// Photos and /add go to the cellar. /order makes a bottle on order: its draft asks 📦 Collect or
+// 🚚 Delivery, then the due date (an online order has no label to photograph, so photos don't).
 // Claude Haiku works out producer, wine, cuvée, vintage, colour, grape and region, asks for the drinking
 // window, and the bot shows a draft with ✅ Add, ✏️ Fix, 🔁 Retry with Sonnet and ❌ Cancel. Nothing
 // is added until you tap Add. Retry reads the label again with Sonnet, the stronger and costlier
@@ -1384,8 +1412,10 @@ function splitPrice_(text) {
   return { text: trim_(s.slice(0, m.index)), price: cleanValue_('price', m[2]) };
 }
 
-// A new draft from a photo (`fileId`) or typed text (`typed`): read it, show it, then ask for
-// the drinking window.
+// A new draft from a photo (`fileId`) or typed text (`typed`): read it and show it. Nothing is asked:
+// the card lists every field, and you reply with what to change ("2028-2040", "price 150").
+// The window is deliberately not asked for any more (the owner's choice); don't add it back.
+// An order (/order) has 📦 Collect / 🚚 Delivery on its card, and tapping one asks for the due date.
 function startDraft_(d, chatId, status) {
   if (!PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY')) {
     telegramSend_('⚠️ I can\'t look up wines yet. Add ANTHROPIC_API_KEY under Project Settings → Script properties.', null, chatId);
@@ -1399,7 +1429,6 @@ function startDraft_(d, chatId, status) {
     d.problem = botError_(err);
   }
   showDraft_(d);
-  if (!d.problem) askDraft_(d, '🍷 What\'s the drinking window? e.g. <i>2028-2040</i>. Or tap ✅ Add on the draft to skip it.', 'e.g. 2028-2040');
 }
 
 function isOrder_(d) { return d.status === 'On order'; }
@@ -1563,9 +1592,24 @@ function windowReply_(text) {
 
 // A reply that is just a date ("5 Dec", "5/12", "2026-12-05", "5 December 2026") as 2026-12-05,
 // or ''. Day before month. Without a year it's the next such date from `today`.
+// Also today, tomorrow, "in 3 days", and weekdays: "friday" or "this friday" is the coming one
+// (today if it's Friday), "next friday" is the Friday of next week (weeks start on Monday).
+// Past dates are returned as they are; notPast_ refuses them where a new due date is set.
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 function dueDate_(text, today) {
-  const s = fold_(text).trim();
+  const s = fold_(text).trim().replace(/\s+/g, ' ');
+  if (s === 'today') return today;
+  if (s === 'tomorrow') return addDays_(today, 1);
+  const inDays = /^in (\d{1,3}) days?$/.exec(s);
+  if (inDays) return addDays_(today, Number(inDays[1]));
+  const wd = /^(this |next )?([a-z]{3,})$/.exec(s);
+  const day = wd ? WEEKDAYS.filter(function (n) { return n.toLowerCase().indexOf(wd[2]) === 0; })[0] : null;
+  if (day) {
+    const monday = function (iso) { return (new Date(iso + 'T12:00:00Z').getUTCDay() + 6) % 7; };  // Mon 0 … Sun 6
+    const want = (WEEKDAYS.indexOf(day) + 6) % 7;
+    const now = monday(today);
+    return wd[1] === 'next ' ? addDays_(today, 7 - now + want) : addDays_(today, (want - now + 7) % 7);
+  }
   const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s);
   const num = /^(\d{1,2})[\/.](\d{1,2})(?:[\/.](\d{4}))?$/.exec(s);
   const named = /^(\d{1,2})\s*([a-z]{3})[a-z]*\.?(?:\s+(\d{4}))?$/.exec(s);
@@ -1581,11 +1625,47 @@ function dueDate_(text, today) {
   return real.getUTCMonth() === m - 1 && real.getUTCDate() === d ? at(y) : '';
 }
 
+// A due date with an optional time after it: "5 Dec 3pm", "friday at 15:00" → { date, time }.
+// A date alone gives time ''. null when there's no date.
+function dueWithTime_(text, today) {
+  const s = trim_(text);
+  const m = /^(.*?)\s*,?\s*(?:at\s+)?(\d{1,2}(?::\d{2})?\s*[ap]m|\d{1,2}:\d{2})$/i.exec(s);
+  const date = dueDate_(m && m[1] ? m[1] : s, today);
+  return date ? { date: date, time: m && m[1] ? timeOf_(m[2]) : '' } : null;
+}
+
+// A new due date can't be in the past.
+function notPast_(date, today) {
+  if (date < today) throw new Error(niceDate_(date) + ' has already passed. Send a date from today on, e.g. 5 Dec or friday.');
+  return date;
+}
+
+// "3pm", "3:30 pm", "9am", "15:00" → "15:00", "15:30", "09:00", "15:00"; anything else → ''.
+// A bare number ("15") isn't taken as a time.
+function timeOf_(text) {
+  const m = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/.exec(fold_(text).trim());
+  if (!m || (!m[2] && !m[3])) return '';
+  let h = Number(m[1]);
+  const min = Number(m[2] || 0);
+  if (m[3]) {
+    if (h < 1 || h > 12) return '';
+    h = h % 12 + (m[3] === 'pm' ? 12 : 0);
+  }
+  if (h > 23 || min > 59) return '';
+  return ('0' + h).slice(-2) + ':' + ('0' + min).slice(-2);
+}
+
+// "5 Dec 2026, 15:00", or the date alone.
+function dueText_(w) {
+  return niceDate_(w.collectBy) + (w.collectTime ? ', ' + escH_(w.collectTime) : '');
+}
+
 // The row ✏️ Fix sends: one "field: value" line per field, mapped to where the draft keeps it.
 // status, arrival and due are only sent for a bottle on order, but a reply can set them on any draft.
 const ROW_FIELDS = { producer: 'producer', wine: 'wine', cuvee: 'cuvee', vintage: 'vintage', colour: 'colour',
-  grape: 'grape', region: 'region', window: 'window', notes: 'hint', price: 'price', status: 'status', arrival: 'arrival', due: 'collectBy' };
-const ORDER_ROWS = ['status', 'arrival', 'due'];
+  grape: 'grape', region: 'region', window: 'window', notes: 'hint', price: 'price', status: 'status', arrival: 'arrival',
+  due: 'collectBy', time: 'collectTime' };
+const ORDER_ROWS = ['status', 'arrival', 'due', 'time'];
 
 function draftRow_(d) {
   return Object.keys(ROW_FIELDS).filter(function (k) { return isOrder_(d) || ORDER_ROWS.indexOf(k) < 0; })
@@ -1639,8 +1719,14 @@ function rowReply_(text) {
   if (row.status) row.status = oneOf_(FIELD_RULES.status.values, row.status, 'The status');
   if (row.arrival) row.arrival = oneOf_(FIELD_RULES.arrival.values, row.arrival, 'arrival');
   if (row.due) {
-    row.due = dueDate_(row.due, today_());
-    if (!row.due) throw new Error('The due date should look like 5 Dec or 2026-12-05.');
+    const due = dueWithTime_(row.due, today_());
+    if (!due) throw new Error('The due date should look like 5 Dec, friday or 2026-12-05.');
+    row.due = notPast_(due.date, today_());
+    if (due.time && !row.time) row.time = due.time;
+  }
+  if (row.time) {
+    row.time = timeOf_(row.time);
+    if (!row.time) throw new Error('The time should look like 3pm or 15:00.');
   }
   return row;
 }
@@ -1755,27 +1841,37 @@ function draftView_(d) {
     return { text: '⚠️ ' + escH_(d.problem) + '\nTry 🔁 Retry, or ' + (d.typed ? 'type it differently.' : 'send a clearer photo.'),
       buttons: [[retry, btn('no', '❌ Cancel')]] };
   }
+  // Every field, named as you'd type it to change it ("region rhône"); empty ones are left blank.
+  const order = isOrder_(d);
+  const blank = function (v) { return v === null || v === undefined || v === ''; };
+  const field = function (icon, name, v) { return icon + ' ' + name + ': ' + (blank(v) ? '' : v); };
   const lines = ['🍷 <b>' + escH_(d.vintage || 'NV') + '</b> ' + escH_(d.producer) + ' · <i>' + escH_(wineField_(d)) + '</i>'];
-  const kind = [d.region, d.grape, d.colour].filter(Boolean).join(' · ');
-  if (kind) lines.push(escH_(kind));
-  lines.push(d.window ? 'Drink ' + escH_(d.window) : 'No drinking window yet.');
-  if (isOrder_(d)) {
-    lines.push('📦 On order' + (d.arrival ? ' · ' + escH_(d.arrival) : '') + (d.collectBy ? ' · due ' + niceDate_(d.collectBy) : ''));
+  if (order) lines.push('📦 <u>On order</u>');
+  lines.push('',
+    field('🎨', 'Colour', escH_(d.colour || '')),
+    field('🍇', 'Grape', escH_(d.grape || '')),
+    field('🗺️', 'Region', escH_(d.region || '')),
+    field('🗓️', 'Window', d.window ? escH_(d.window) + (order ? ' <i>(shows once it arrives)</i>' : '') : ''),
+    field('💰', 'Price', blank(d.price) ? '' : escH_(lookups_().settings.currency) + money_(d.price)),
+    field('📝', 'Notes', escH_(d.hint || '')));
+  if (order) {
+    lines.push(
+      field(d.arrival === 'Delivery' ? '🚚' : '📦', 'Arrival', escH_(d.arrival || '')),
+      field('📅', 'Due', d.collectBy ? niceDate_(d.collectBy) : ''),
+      field('🕒', 'Time', escH_(d.collectTime || '')));
   }
-  if (d.price !== null && d.price !== undefined) lines.push('Price ' + escH_(lookups_().settings.currency) + money_(d.price));
-  if (d.hint) lines.push('Note: ' + escH_(d.hint));
-  const canOrder = !d.arrival;  // in the cellar, or an order still missing collect or delivery
-  lines.push('', (d.window ? 'Tap ✅ to add it, or ✏️ to change something.'
-    : 'Reply to this message with the drinking window (e.g. <i>2028-2040</i>), or tap ✅ to add it without one.') +
-    (canOrder ? ' On order? Tap 📦 or 🚚.' : ''));
+  const howArrives = order && !d.arrival;  // an order still missing collect or delivery
+  lines.push('', howArrives ? 'Collecting it or having it delivered? Tap 📦 or 🚚. Or tap ✅ to add it as it is.'
+    : 'Tap ✅ to add it. To change something, reply with it, e.g. <i>2028-2040</i> or <i>price 150</i>, or tap ✏️ Fix.');
   const buttons = [[btn('ok', '✅ Add'), btn('fix', '✏️ Fix')], [retry, btn('no', '❌ Cancel')]];
-  if (canOrder) buttons.splice(1, 0, [btn('collect', '📦 Order · collect'), btn('deliver', '🚚 Order · delivery')]);
+  if (howArrives) buttons.splice(1, 0, [btn('collect', '📦 Collect'), btn('deliver', '🚚 Delivery')]);
   return { text: lines.join('\n'), buttons: buttons };
 }
 
 function draftWine_(d) {
   return { producer: d.producer, wine: wineField_(d), vintage: d.vintage, colour: d.colour, grape: d.grape,
-    region: d.region, window: d.window, notes: d.hint, price: d.price, status: d.status, arrival: d.arrival, collectBy: d.collectBy };
+    region: d.region, window: d.window, notes: d.hint, price: d.price, status: d.status, arrival: d.arrival, collectBy: d.collectBy,
+    collectTime: d.collectTime };
 }
 
 // What tapping a draft's button does. Each gets the draft and `edit(text, buttons)`, which
@@ -1804,7 +1900,7 @@ const DRAFT_ACTIONS = {
   },
 };
 
-// 📦 Order · collect or 🚚 Order · delivery: the bottle is on order, then the due date is asked for.
+// 📦 Collect or 🚚 Delivery on an /order draft: how it arrives, then the due date is asked for.
 function arrivalTap_(how) {
   return function (d) {
     d.status = 'On order';
@@ -1812,7 +1908,7 @@ function arrivalTap_(how) {
     showDraft_(d);
     if (!d.collectBy) {
       askDraft_(d, (how === 'Collect' ? '📦 When can you collect it?' : '🚚 When does it arrive?') +
-        ' e.g. <i>5 Dec</i> or <i>2026-12-05</i>', 'e.g. 5 Dec');
+        ' e.g. <i>5 Dec</i>, <i>friday</i> or <i>tomorrow 3pm</i>', 'e.g. friday 3pm');
     }
   };
 }
@@ -1845,14 +1941,15 @@ function fixFromReply_(d, text, chatId) {
   try {
     const row = rowReply_(text);
     const win = row ? '' : windowReply_(text);
-    const due = row || win ? '' : dueDate_(text, today_());
+    const due = row || win ? null : dueWithTime_(text, today_());
     if (row) {
       Object.keys(row).forEach(function (k) { d[ROW_FIELDS[k]] = k === 'window' ? cleanWindow_(row[k]) : row[k]; });
       d.problem = '';
     } else if (win) {
       d.window = win;
     } else if (due) {
-      d.collectBy = due;
+      d.collectBy = notPast_(due.date, today_());
+      if (due.time) d.collectTime = due.time;
     } else {
       throw new Error('I didn\'t understand that. Send e.g. 2028-2040, price 150 or vintage 2019. Fields: ' +
         Object.keys(ROW_FIELDS).join(', ') + '.');
@@ -1874,7 +1971,7 @@ function fixFromReply_(d, text, chatId) {
 // Whether text sent without replying is a change for a draft rather than a search: a window, a
 // due date, or "field: value" (the colon keeps searches like "grape pinot" as searches).
 function looksLikeFix_(text) {
-  if (windowReply_(text) || dueDate_(text, today_())) return true;
+  if (windowReply_(text) || dueWithTime_(text, today_())) return true;
   if (text.indexOf(':') < 0) return false;
   try { return !!rowReply_(text); } catch (err) { return true; }  // field-shaped: show its error
 }

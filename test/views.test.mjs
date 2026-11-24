@@ -97,6 +97,22 @@ test("list: an on-order bottle has Arrived but no Opened one", () => {
   assert.match(html, /data-act="drink" data-id="k"/);
   assert.doesNotMatch(html, /data-act="drink" data-id="g"/);
   assert.match(html, /data-act="arrived" data-id="g">Collected/);
+  const timed = listHTML({ q: "", filter: "All", owner: true, consumed: [], cellar: [{ ...cellar[1], collectBy: "2026-11-27", collectTime: "15:00" }] });
+  assert.match(timed, /Collect by 27 Nov 2026, 15:00/);
+});
+
+test("a bottle on order shows no drinking window, here or on the timeline", () => {
+  const cellar = [
+    { id: "k", producer: "Duroche", wine: "Vosne", vintage: 2018, status: "In cellar", window: "2024–2035" },
+    { id: "g", producer: "Gros", wine: "Moulin-à-Vent", vintage: 2023, status: "On order", window: "2025–2029" },
+  ];
+  const html = listHTML({ q: "", filter: "All", owner: true, consumed: [], cellar });
+  const order = html.slice(html.indexOf('data-id="g"'));
+  assert.match(html, /Drink 2024–2035/);
+  assert.doesNotMatch(order, /Drink 2025–2029|Drink now/);
+  const tl = timelineHTML(cellar, NOW);
+  assert.match(tl, /Duroche/);
+  assert.doesNotMatch(tl, /Gros/);
 });
 
 test("region: shown on the entry and the tasting card, and found by search", () => {
