@@ -19,7 +19,7 @@ const SNAPSHOT = isDemo ? "cellar.demo.snapshot" : "cellar.snapshot";
 const state = {
   cellar: [],
   consumed: [],
-  lists: FALLBACK_LISTS,  // colours, grapes, storage places: from the sheet's Lists tab
+  lists: FALLBACK_LISTS,  // colours, grapes, regions, storage places: from the sheet's Lists tab
   settings: {},           // currency etc.: from the sheet's Settings tab
   token: isDemo ? null : saved.get(TOKEN),
   owner: false,
@@ -102,6 +102,7 @@ function render() {
     .map(v => `<option value="${esc(v)}"></option>`).join("");
   $("#producers").innerHTML = options([], "producer");
   $("#grapes").innerHTML = options(state.lists.grapes, "grape");
+  $("#regions").innerHTML = options(state.lists.regions || [], "region");
   $("#places").innerHTML = options(state.lists.storage, "storage");
 }
 
@@ -287,7 +288,7 @@ async function fillWithAi(strong) {
     fillColours(w.colour || colour);
     form.elements.colour.value = colour;
     // Only what the AI found: a blank answer never wipes what you typed.
-    for (const k of ["producer", "wine", "vintage", "colour", "grape"]) if (w[k]) form.elements[k].value = w[k];
+    for (const k of ["producer", "wine", "vintage", "colour", "grape", "region"]) if (w[k]) form.elements[k].value = w[k];
     $("#ed-more").open = true;
     aiStatus("Filled in. Check it, add the drinking window, then Save.", false, !strong);
     $("#f-window").focus();

@@ -15,7 +15,7 @@
  * Telegram:   TELEGRAM_TOKEN property → findTelegramChatId() → installTelegram(), then for fast replies
  *             relaySecret() → Cloudflare Worker → installTelegramRelay().   (Optional; see README.md.)
  * New field:  add it to SCHEMA (and FIELD_RULES if it isn't free text), then run migrate().
- * Lists:      colours, grapes and storage places live in the "Lists" tab; currency and reminder
+ * Lists:      colours, grapes, regions and storage places live in the "Lists" tab; currency and reminder
  *             timing in the "Settings" tab. migrate() creates both. Edit them in the sheet.
  * Check-up:   status() shows the stored settings, timers and whether the web app runs this build.
  * Tests:      `node --test` in the repo runs this file against an in-memory sheet.
@@ -27,13 +27,13 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-24.7';
+const BUILD = '2026-11-24.8';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
-    'storage', 'price', 'purchased', 'notes', 'hidden', 'created', 'updated', 'collectBy', 'arrival'],
+    'storage', 'price', 'purchased', 'notes', 'hidden', 'created', 'updated', 'collectBy', 'arrival', 'region'],
   Consumed: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'price', 'purchased',
-    'consumedOn', 'rating', 'notes', 'hidden', 'created', 'updated'],
+    'consumedOn', 'rating', 'notes', 'hidden', 'created', 'updated', 'region'],
 };
 
 // How each field is checked. A field not listed here is free text (trimmed, max 1000 characters).
@@ -81,6 +81,9 @@ const DEFAULT_LISTS = {
   grapes: ['Pinot Noir', 'Chardonnay', 'Gamay', 'Shiraz', 'Syrah', 'Grenache', 'Mourvèdre', 'Cabernet Sauvignon',
     'Merlot', 'Cabernet Franc', 'Malbec', 'Nebbiolo', 'Sangiovese', 'Tempranillo', 'Riesling', 'Sauvignon Blanc',
     'Chenin Blanc', 'Sémillon', 'Viognier', 'Pinot Meunier'],
+  // Beaujolais is filed under Burgundy (the owner's choice), so it has no region of its own.
+  regions: ['Burgundy', 'Champagne', 'Bordeaux', 'Rhône', 'Loire', 'Alsace', 'Jura', 'Piedmont', 'Tuscany', 'Rioja',
+    'Mosel', 'Barossa Valley'],
   storage: [],
 };
 
@@ -105,6 +108,7 @@ const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Frida
 const LIST_FIELDS = {
   colour: function (l) { return l.colours.map(function (c) { return c.name; }); },
   grape: function (l) { return l.grapes; },
+  region: function (l) { return l.regions; },
   storage: function (l) { return l.storage; },
 };
 
@@ -167,11 +171,11 @@ function migrate() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   if (!ss.getSheetByName(LOOKUP_TABS.lists)) {
     const l = DEFAULT_LISTS;
-    const rows = Math.max(l.colours.length, l.grapes.length, 1);
-    const values = [['colour', 'colourTone', 'grape', 'storage']];
+    const rows = Math.max(l.colours.length, l.grapes.length, l.regions.length, 1);
+    const values = [['colour', 'colourTone', 'grape', 'region', 'storage']];
     for (let i = 0; i < rows; i++) {
       const c = l.colours[i];
-      values.push([c ? c.name : '', c ? c.tone : '', l.grapes[i] || '', l.storage[i] || '']);
+      values.push([c ? c.name : '', c ? c.tone : '', l.grapes[i] || '', l.regions[i] || '', l.storage[i] || '']);
     }
     writeTab_(ss.insertSheet(LOOKUP_TABS.lists), values);
   }
@@ -565,7 +569,8 @@ function lookups_() {
     return { rows: v.slice(1), at: function (h) { return head.indexOf(h.toLowerCase()); } };
   };
 
-  const lists = { colours: DEFAULT_LISTS.colours, grapes: DEFAULT_LISTS.grapes, storage: DEFAULT_LISTS.storage };
+  const lists = { colours: DEFAULT_LISTS.colours, grapes: DEFAULT_LISTS.grapes, regions: DEFAULT_LISTS.regions,
+    storage: DEFAULT_LISTS.storage };
   const l = read(LOOKUP_TABS.lists);
   if (l) {
     const column = function (h) {
@@ -581,6 +586,7 @@ function lookups_() {
       });
     }
     if (column('grape')) lists.grapes = column('grape');
+    if (column('region')) lists.regions = column('region');
     if (column('storage')) lists.storage = column('storage');
   }
 
@@ -889,7 +895,7 @@ function status() {
   say('Settings tab: ' + Object.keys(look.settings).map(function (k) { return k + ' ' + look.settings[k]; }).join(', '));
   look.problems.forEach(function (p) { say('  ⚠ ' + p); });
   say('Lists tab: ' + look.lists.colours.length + ' colours, ' + look.lists.grapes.length + ' grapes, ' +
-    look.lists.storage.length + ' storage places.');
+    look.lists.regions.length + ' regions, ' + look.lists.storage.length + ' storage places.');
 
   Logger.log(out.join('\n'));
   return out;
@@ -1282,7 +1288,7 @@ function cellarRecs_(guest) {
 function searchRecs_(recs, q) {
   const words = fold_(q).split(/\s+/).filter(Boolean);
   return sortCellar_(recs.filter(function (w) {
-    const hay = fold_([w.producer, w.wine, w.grape, w.vintage, w.colour, w.notes].join(' '));
+    const hay = fold_([w.producer, w.wine, w.region, w.grape, w.vintage, w.colour, w.notes].join(' '));
     return words.every(function (word) { return hay.indexOf(word) >= 0; });
   }));
 }
@@ -1302,7 +1308,7 @@ function sortCellar_(recs) {
 // Send the bot a photo of a label, or type /add and the wine's name (spelling mistakes are fine).
 // A draft goes to the cellar unless you tap 📦 Order · collect or 🚚 Order · delivery on it; that
 // makes it a bottle on order and asks for the due date.
-// Claude Haiku works out producer, wine, cuvée, vintage, colour and grape, asks for the drinking
+// Claude Haiku works out producer, wine, cuvée, vintage, colour, grape and region, asks for the drinking
 // window, and the bot shows a draft with ✅ Add, ✏️ Fix, 🔁 Retry with Sonnet and ❌ Cancel. Nothing
 // is added until you tap Add. Retry reads the label again with Sonnet, the stronger and costlier
 // model, for labels Haiku gets wrong. You give the drinking window yourself by replying to the
@@ -1316,7 +1322,7 @@ const LABEL = {
   maxTokens: 1000,  // the answer is about 200 tokens; a low cap keeps any misuse cheap
   maxField: 150,    // longest producer, wine, cuvée… kept from an answer
 };
-const DRAFT_FIELDS = ['producer', 'wine', 'cuvee', 'vintage', 'colour', 'grape'];
+const DRAFT_FIELDS = ['producer', 'wine', 'cuvee', 'vintage', 'colour', 'grape', 'region'];
 
 // The caption is a note, kept as it is (the price, if any, is added with ✏️ Fix or "price: 150").
 function labelFromPhoto_(msg, chatId) {
@@ -1413,7 +1419,8 @@ function identifyFromPage_(input) {
   const got = identifyWine_(p ? { photo: { media_type: p.media_type, data: p.data }, hint: text } : { typed: text },
     i.strong ? LABEL.retry : LABEL.reader);
   if (got.problem) throw new Error(got.problem + ' Try again, or fill it in yourself.');
-  return { producer: got.producer, wine: wineField_(got), vintage: got.vintage, colour: got.colour, grape: got.grape };
+  return { producer: got.producer, wine: wineField_(got), vintage: got.vintage, colour: got.colour, grape: got.grape,
+    region: got.region };
 }
 
 function downloadPhoto_(fileId) {
@@ -1460,6 +1467,8 @@ function readWine_(content, model) {
         'édition numbers. "" if non-vintage.',
       '- Colour and grape: from the label, or only where certain for that wine (e.g. red Burgundy = Pinot Noir, ' +
         'Blanc de Blancs = Chardonnay). Spell grapes like this where they fit: ' + lookups_().lists.grapes.join(', ') + '.',
+      '- Region: the wine region, spelled like this where it fits: ' + lookups_().lists.regions.join(', ') + '. ' +
+        'Beaujolais, including its crus such as Moulin-à-Vent or Morgon, is Burgundy. "" if unsure.',
       '- Typed names may be misspelled or shortened: give the real, correctly spelled names. If the text could be ' +
         'several wines, choose the most general one that fits (e.g. the village wine rather than a vineyard) ' +
         'instead of refusing.',
@@ -1491,7 +1500,7 @@ function labelSchema_() {
   const str = { type: 'string' };
   const colours = lookups_().lists.colours.map(function (c) { return c.name; }).concat(['']);
   const props = { readable: { type: 'boolean' }, producer: str, wine: str, cuvee: str, vintage: str,
-    colour: { type: 'string', enum: colours }, grape: str };
+    colour: { type: 'string', enum: colours }, grape: str, region: str };
   return { type: 'object', additionalProperties: false, required: Object.keys(props), properties: props };
 }
 
@@ -1530,7 +1539,7 @@ function dueDate_(text, today) {
 // The row ✏️ Fix sends: one "field: value" line per field, mapped to where the draft keeps it.
 // status, arrival and due are only sent for a bottle on order, but a reply can set them on any draft.
 const ROW_FIELDS = { producer: 'producer', wine: 'wine', cuvee: 'cuvee', vintage: 'vintage', colour: 'colour',
-  grape: 'grape', window: 'window', notes: 'hint', price: 'price', status: 'status', arrival: 'arrival', due: 'collectBy' };
+  grape: 'grape', region: 'region', window: 'window', notes: 'hint', price: 'price', status: 'status', arrival: 'arrival', due: 'collectBy' };
 const ORDER_ROWS = ['status', 'arrival', 'due'];
 
 function draftRow_(d) {
@@ -1702,7 +1711,7 @@ function draftView_(d) {
       buttons: [[retry, btn('no', '❌ Cancel')]] };
   }
   const lines = ['🍷 <b>' + escH_(d.vintage || 'NV') + '</b> ' + escH_(d.producer) + ' · <i>' + escH_(wineField_(d)) + '</i>'];
-  const kind = [d.colour, d.grape].filter(Boolean).join(' · ');
+  const kind = [d.region, d.grape, d.colour].filter(Boolean).join(' · ');
   if (kind) lines.push(escH_(kind));
   lines.push(d.window ? 'Drink ' + escH_(d.window) : 'No drinking window yet.');
   if (isOrder_(d)) {
@@ -1721,7 +1730,7 @@ function draftView_(d) {
 
 function draftWine_(d) {
   return { producer: d.producer, wine: wineField_(d), vintage: d.vintage, colour: d.colour, grape: d.grape,
-    window: d.window, notes: d.hint, price: d.price, status: d.status, arrival: d.arrival, collectBy: d.collectBy };
+    region: d.region, window: d.window, notes: d.hint, price: d.price, status: d.status, arrival: d.arrival, collectBy: d.collectBy };
 }
 
 // What tapping a draft's button does. Each gets the draft and `edit(text, buttons)`, which

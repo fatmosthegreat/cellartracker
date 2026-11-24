@@ -259,9 +259,9 @@ test('migrate() adds missing columns without touching data', () => {
   const { ok, tab, backend } = freshCellar();
   const cellar = tab('Cellar');
   const before = ok('list').cellar;
-  backend.SCHEMA.Cellar.push('region');
+  backend.SCHEMA.Cellar.push('cork');
   backend.migrate();
-  assert.ok(cellar.getRange(1, 1, 1, cellar.getLastColumn()).getDisplayValues()[0].includes('region'));
+  assert.ok(cellar.getRange(1, 1, 1, cellar.getLastColumn()).getDisplayValues()[0].includes('cork'));
   assert.deepEqual(ok('list').cellar.map(w => w.price), before.map(w => w.price));
 });
 
@@ -471,6 +471,21 @@ test('the reader keeps vineyard articles like En and Les', () => {
   assert.match(system, /En Orveaux/);
 });
 
+test('the reader fills in the region, and files Beaujolais under Burgundy', () => {
+  const c = labelBot();
+  assert.equal(c.ok('identify', { identify: { text: 'something' } }).result.region, 'Burgundy');
+  const sent = c.gas._fetches.find(f => f.method === 'anthropic').payload;
+  assert.match(sent.system, /Region: the wine region, spelled like this where it fits: Burgundy, Champagne/);
+  assert.match(sent.system, /Beaujolais, including its crus such as Moulin-à-Vent or Morgon, is Burgundy/);
+  assert.ok(sent.output_config.format.schema.required.includes('region'));
+});
+
+test('a bottle keeps its region when it is opened', () => {
+  const { ok } = freshCellar();
+  const w = ok('create', { wine: { producer: 'Chave', wine: 'Hermitage', region: 'Rhône', status: 'In cellar' } }).cellar.find(x => x.producer === 'Chave');
+  assert.equal(ok('drink', { id: w.id }).consumed.find(x => x.producer === 'Chave').region, 'Rhône');
+});
+
 test('a failed tap acknowledgement still replaces the buttons, so a bottle is never drunk twice', () => {
   const { say, tap, sent, buttons, gas } = freshBot();
   const btn = buttons(say('/opened jadot'))[0];
@@ -632,7 +647,7 @@ function labelBot({ keys = true } = {}) {
   c.gas._replies.getFile = () => ({ ok: true, result: { file_path: 'photos/file_1.jpg' } });
   c.answers = {
     label: { readable: true, producer: 'Domaine Duroché', wine: 'Gevrey-Chambertin 1er Cru', cuvee: 'Lavaut St-Jacques',
-      vintage: '2019', colour: 'Red', grape: 'Pinot Noir' },
+      vintage: '2019', colour: 'Red', grape: 'Pinot Noir', region: 'Burgundy' },
   };
   c.gas._replies.anthropic = p => {
     const reply = Array.isArray(p.messages[0].content) ? c.answers.label : c.answers.fixed;
@@ -723,7 +738,7 @@ test('changes to a draft are parsed in code, never sent to Claude; Retry keeps t
 
   // Several fields in one message, separated by commas or " / ", with friendly names.
   const many = c.draft(c.reply(fixed.messageId, 'price 150, drinking window 2026-2034 / color white'));
-  assert.match(many.text, /<b>2018<\/b>[\s\S]*White · Pinot Noir\nDrink 2026–2034\nPrice S\$150/);
+  assert.match(many.text, /<b>2018<\/b>[\s\S]*Burgundy · Pinot Noir · White\nDrink 2026–2034\nPrice S\$150/);
   // A comma that isn't followed by a field stays in the value.
   const noted = c.draft(c.reply(many.messageId, 'note: magnum, from the auction'));
   assert.match(noted.text, /Note: magnum, from the auction/);
@@ -770,7 +785,7 @@ test('✏️ Fix sends the whole row; the edited row comes back with no Claude c
   const ask = c.calls(c.press(first.buttons.Fix, first.messageId), 'sendMessage')[0];
   assert.equal(ask.payload.reply_markup.force_reply, true);
   assert.match(ask.payload.text, /<pre>producer: Domaine Duroché\nwine: Gevrey-Chambertin 1er Cru\ncuvee: Lavaut St-Jacques\n/);
-  assert.match(ask.payload.text, /vintage: 2019\ncolour: Red\ngrape: Pinot Noir\nwindow: \nnotes: Bought at Wine Co\nprice: <\/pre>/);
+  assert.match(ask.payload.text, /vintage: 2019\ncolour: Red\ngrape: Pinot Noir\nregion: Burgundy\nwindow: \nnotes: Bought at Wine Co\nprice: <\/pre>/);
   const askId = c.lastMessageId();
 
   // The whole row, edited: a new vintage, a window, a cleared cuvée and a new note.
@@ -778,14 +793,14 @@ test('✏️ Fix sends the whole row; the edited row comes back with no Claude c
     'colour: Red\ngrape: Pinot Noir\nwindow: 2027-2040\nnotes: magnum');
   assert.equal(c.calls(edited, 'anthropic').length, 0, 'no Claude call');
   const draft = c.draft(edited);
-  assert.match(draft.text, /<b>2018<\/b> Domaine Duroché · <i>Gevrey-Chambertin<\/i>\nRed · Pinot Noir\nDrink 2027–2040\nNote: magnum/);
+  assert.match(draft.text, /<b>2018<\/b> Domaine Duroché · <i>Gevrey-Chambertin<\/i>\nBurgundy · Pinot Noir · Red\nDrink 2027–2040\nNote: magnum/);
 
   // One line is enough; other fields stay as they are.
   const one = c.draft(c.reply(draft.messageId, 'Color: White'));
-  assert.match(one.text, /<b>2018<\/b>[\s\S]*White · Pinot Noir\nDrink 2027–2040/);
+  assert.match(one.text, /<b>2018<\/b>[\s\S]*Burgundy · Pinot Noir · White\nDrink 2027–2040/);
 
   // Mistakes are explained, and the draft is unchanged.
-  assert.match(c.sent(c.reply(one.messageId, 'vintage: 2018\nregion: Burgundy')), /"region: Burgundy" isn't a field/);
+  assert.match(c.sent(c.reply(one.messageId, 'vintage: 2018\ncork: natural')), /"cork: natural" isn't a field/);
   assert.match(c.sent(c.reply(one.messageId, 'window: soon')), /should look like 2028-2040/);
   assert.match(c.sent(c.reply(one.messageId, 'vintage: 18')), /year like 2019/);
 
@@ -797,7 +812,7 @@ test('✏️ Fix sends the whole row; the edited row comes back with no Claude c
 test('/add looks a wine up by name with Haiku, asks for the window, and works like a photo draft', () => {
   const c = labelBot();
   c.answers.label = { readable: true, producer: 'Domaine Leflaive', wine: 'Bourgogne Blanc', cuvee: '',
-    vintage: '2022', colour: 'White', grape: 'Chardonnay' };
+    vintage: '2022', colour: 'White', grape: 'Chardonnay', region: 'Burgundy' };
   const calls = c.say('/add levlaie bogogne blanc 2022');
   assert.match(c.sent(calls), /Looking up the wine/);
   assert.equal(c.calls(calls, 'getFile').length, 0, 'no photo to download');
@@ -807,7 +822,7 @@ test('/add looks a wine up by name with Haiku, asks for the window, and works li
   assert.deepEqual(read.payload.messages[0].content, [{ type: 'text', text: 'The owner typed: <owner_text>levlaie bogogne blanc 2022</owner_text>' }]);
 
   const draft = c.draft(calls);
-  assert.match(draft.text, /<b>2022<\/b> Domaine Leflaive · <i>Bourgogne Blanc<\/i>\nWhite · Chardonnay\nNo drinking window yet/);
+  assert.match(draft.text, /<b>2022<\/b> Domaine Leflaive · <i>Bourgogne Blanc<\/i>\nBurgundy · Chardonnay · White\nNo drinking window yet/);
   assert.deepEqual(Object.keys(draft.buttons), ['Add', 'Fix', 'Collect', 'Delivery', 'Retry', 'Cancel']);
   assert.equal(draft.labels.Retry, '🔁 Retry with Sonnet');
 
@@ -823,6 +838,7 @@ test('/add looks a wine up by name with Haiku, asks for the window, and works li
   // ✏️ Fix sends the whole row, as for a photo; an edited row is applied with no Claude call.
   const fix = c.calls(c.press(withWindow.buttons.Fix, withWindow.messageId), 'sendMessage')[0];
   assert.match(fix.payload.text, /<pre>producer: Domaine Leflaive\nwine: Bourgogne Blanc\ncuvee: \nvintage: 2022/);
+  assert.match(fix.payload.text, /grape: Chardonnay\nregion: Burgundy\n/);
   const edited = c.reply(c.lastMessageId(), 'cuvee: Les Sétilles');
   assert.equal(c.calls(edited, 'anthropic').length, 0);
   const fixed = c.draft(edited);
@@ -979,7 +995,7 @@ test('the website\'s ✨ identify uses the same AI code, for the owner only, and
   // Typed: Haiku, the same prompt as the bot, and the cuvée folded into the wine for the Add form.
   const typed = c.ok('identify', { identify: { text: '  levlaie bogogne blanc 2022 ' } });
   assert.deepEqual(typed.result, { producer: 'Domaine Duroché', wine: 'Gevrey-Chambertin 1er Cru Lavaut St-Jacques',
-    vintage: '2019', colour: 'Red', grape: 'Pinot Noir' });
+    vintage: '2019', colour: 'Red', grape: 'Pinot Noir', region: 'Burgundy' });
   const [first] = anthropic();
   assert.equal(first.payload.model, 'claude-haiku-5-5');
   assert.match(first.payload.system, /You identify ONE wine for a personal cellar list/);
@@ -1031,9 +1047,10 @@ test('AI safeguards: typed text is tagged as data, answers are capped and checke
   assert.match(sent.payload.system, /<owner_text> tags is what the owner typed/);
 
   // A long field is cut; a vintage that isn't a year from 1800 to 2100 is dropped.
-  c.answers.label = { ...c.answers.label, cuvee: 'x'.repeat(500), vintage: '19th century' };
+  c.answers.label = { ...c.answers.label, cuvee: 'x'.repeat(500), vintage: '19th century', region: 'y'.repeat(500) };
   const long = c.ok('identify', { identify: { text: 'something' } }).result;
   assert.equal(long.vintage, '');
+  assert.equal(long.region, 'y'.repeat(150));
   assert.equal(long.wine, 'Gevrey-Chambertin 1er Cru ' + 'x'.repeat(150));
   c.answers.label = { ...c.answers.label, cuvee: '', vintage: '1066' };
   assert.equal(c.ok('identify', { identify: { text: 'something' } }).result.vintage, '');
@@ -1161,7 +1178,8 @@ const setSetting = (tab, key, value) => { tab('Settings').rows.find(r => r[0] ==
 
 test('migrate creates the Lists, Settings and Reminders log tabs, and never overwrites them', () => {
   const { backend, tab, ok } = freshCellar();
-  assert.deepEqual(tab('Lists').rows[0], ['colour', 'colourTone', 'grape', 'storage']);
+  assert.deepEqual(tab('Lists').rows[0], ['colour', 'colourTone', 'grape', 'region', 'storage']);
+  assert.deepEqual(tab('Lists').rows[1].slice(3, 4), ['Burgundy']);
   assert.deepEqual(tab('Lists').rows[1].slice(0, 3), ['Sparkling', 'white', 'Pinot Noir']);
   assert.deepEqual(tab('Settings').rows.slice(1).map(r => r[0]), ['currency', 'reminderHour', 'closeReminderMonths', 'nudgeDay', 'aiDailyLimit']);
   assert.equal(tab('Reminders log').hidden, true, 'the log tab is hidden');
@@ -1175,12 +1193,14 @@ test('migrate creates the Lists, Settings and Reminders log tabs, and never over
   assert.deepEqual(res.lists.colours.at(-1), { name: 'Orange', tone: 'white' });
 });
 
-test('colour, grape and storage are saved in the Lists spelling; values not in a list are kept', () => {
+test('colour, grape, region and storage are saved in the Lists spelling; values not in a list are kept', () => {
   const { ok, tab } = freshCellar();
-  tab('Lists').rows.push(['Orange', 'Rosé', '', "Friend's fridge"]);
-  const res = ok('create', { wine: { producer: 'Gravner', wine: 'Ribolla', colour: ' orange', grape: 'pinot  noir', storage: "FRIEND'S FRIDGE" } });
+  tab('Lists').rows.push(['Orange', 'Rosé', '', 'Friuli', "Friend's fridge"]);
+  const res = ok('create', { wine: { producer: 'Gravner', wine: 'Ribolla', colour: ' orange', grape: 'pinot  noir', region: 'friuli', storage: "FRIEND'S FRIDGE" } });
   const w = res.cellar.find(x => x.producer === 'Gravner');
-  assert.deepEqual([w.colour, w.grape, w.storage], ['Orange', 'Pinot Noir', "Friend's fridge"]);
+  assert.deepEqual([w.colour, w.grape, w.region, w.storage], ['Orange', 'Pinot Noir', 'Friuli', "Friend's fridge"]);
+  assert.equal(ok('create', { wine: { producer: 'Chave', wine: 'Hermitage', region: 'rhone' } }).cellar.find(x => x.producer === 'Chave').region, 'Rhône');
+  assert.ok(res.lists.regions.includes('Burgundy'));
   assert.equal(res.lists.colours.at(-1).tone, 'rose', '"Rosé" in the tone column means rose');
   assert.deepEqual(res.lists.storage, ["Friend's fridge"]);
   const other = ok('create', { wine: { producer: 'Radikon', wine: 'Jakot', colour: 'Amber', grape: 'Tocai Friulano' } })

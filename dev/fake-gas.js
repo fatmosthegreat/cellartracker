@@ -187,19 +187,19 @@ function createFakeGas() {
 // Not used by the live app; your real bottles live in the Google Sheet.
 const SAMPLE_BOTTLES = {
   cellar: [
-    { producer: 'Leflaive', wine: 'Bourgogne Blanc', vintage: 2022, colour: 'White', grape: 'Chardonnay',
+    { producer: 'Leflaive', wine: 'Bourgogne Blanc', vintage: 2022, colour: 'White', grape: 'Chardonnay', region: 'Burgundy',
       window: '2024–2030', bottles: 1, status: 'In cellar', price: 150 },
-    { producer: 'Jadot', wine: 'Gevrey-Chambertin', vintage: 2018, colour: 'Red', grape: 'Pinot Noir',
+    { producer: 'Jadot', wine: 'Gevrey-Chambertin', vintage: 2018, colour: 'Red', grape: 'Pinot Noir', region: 'Burgundy',
       window: '2023–2033', bottles: 1, status: 'In cellar', price: 140 },
-    { producer: 'Duroche', wine: 'Vosne-Romanée', vintage: 2018, colour: 'Red', grape: 'Pinot Noir',
+    { producer: 'Duroche', wine: 'Vosne-Romanée', vintage: 2018, colour: 'Red', grape: 'Pinot Noir', region: 'Burgundy',
       window: '2024–2035', bottles: 1, status: 'In cellar', price: 152 },
     { producer: 'Coudray-Bizot', wine: 'Vosne-Romanée 1er Cru La Croix Rameau', vintage: 2020, colour: 'Red',
-      grape: 'Pinot Noir', window: '2027–2040', bottles: 1, status: 'In cellar', price: 313 },
-    { producer: 'A F Gros', wine: 'Moulin-à-Vent', vintage: 2023, colour: 'Red', grape: 'Gamay',
+      grape: 'Pinot Noir', region: 'Burgundy', window: '2027–2040', bottles: 1, status: 'In cellar', price: 313 },
+    { producer: 'A F Gros', wine: 'Moulin-à-Vent', vintage: 2023, colour: 'Red', grape: 'Gamay', region: 'Burgundy',
       window: '2025–2029', bottles: 1, status: 'On order', arrival: 'Collect', storage: 'Grand Cru, collect Fri 27 Nov', price: 54 },
   ],
   consumed: [
-    { producer: 'Penfolds', wine: 'Bin 128', vintage: 2024, colour: 'Red', grape: 'Shiraz', price: 88 },
+    { producer: 'Penfolds', wine: 'Bin 128', vintage: 2024, colour: 'Red', grape: 'Shiraz', region: 'South Australia', price: 88 },
   ],
 };
 

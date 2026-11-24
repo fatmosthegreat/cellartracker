@@ -12,6 +12,7 @@ export const FALLBACK_LISTS = {
     { name: "Red", tone: "red" }, { name: "Sweet", tone: "white" }, { name: "Fortified", tone: "red" },
   ],
   grapes: [],
+  regions: [],
   storage: [],
 };
 
@@ -107,7 +108,7 @@ export function listHTML(state) {
   const lists = listsOf(state);
   const currency = currencyOf(state);
   const q = fold(state.q.trim());
-  const matches = w => !q || fold([w.producer, w.wine, w.grape, w.vintage, w.colour, w.notes].join(" ")).includes(q);
+  const matches = w => !q || fold([w.producer, w.wine, w.region, w.grape, w.vintage, w.colour, w.notes].join(" ")).includes(q);
   const sections = SECTIONS.filter(s => state.filter === "All" || state.filter === s.status);
   let html = "";
   for (const s of sections) {
@@ -163,6 +164,7 @@ export function tastingHTML(w, currency = "", lists = FALLBACK_LISTS) {
     ["Consumed", w.consumedOn ? formatDate(w.consumedOn) : ""],
     ["Bought", w.purchased ? formatDate(w.purchased) : ""],
     ["Price", w.price !== null && w.price !== undefined && w.price !== "" ? `${currency}${money(w.price)}` : ""],
+    ["Region", w.region],
     ["Grape", [w.grape, w.colour].filter(Boolean).join(" · ")],
   ].filter(f => f[1]);
   return `<p class="eyebrow">Tasting card</p>
@@ -175,7 +177,7 @@ export function tastingHTML(w, currency = "", lists = FALLBACK_LISTS) {
 function entryHTML(w, source, owner, lists) {
   const tone = toneOf(w.colour, lists);
   const meta = [];
-  const kind = [w.grape, w.colour].filter(Boolean).join(" · ");
+  const kind = [w.region, w.grape, w.colour].filter(Boolean).join(" · ");
   if (kind) meta.push(`<span><i class="swatch" data-tone="${tone}"></i>${esc(kind)}</span>`);
 
   if (source === "consumed") {

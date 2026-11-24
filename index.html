@@ -42,7 +42,7 @@
       <button class="chip" type="button" data-filter="On order" aria-pressed="false">On order</button>
       <button class="chip" type="button" data-filter="Consumed" aria-pressed="false">Consumed</button>
     </div>
-    <input class="search" id="search" type="search" placeholder="Search producer, wine, grape" aria-label="Search the cellar">
+    <input class="search" id="search" type="search" placeholder="Search producer, wine, grape, region" aria-label="Search the cellar">
   </div>
 
   <main id="list" aria-live="polite"></main>
@@ -60,6 +60,7 @@
 <div class="toast" id="toast" role="status"></div>
 <datalist id="producers"></datalist>
 <datalist id="grapes"></datalist>
+<datalist id="regions"></datalist>
 <datalist id="places"></datalist>
 
 <!-- Add or edit a bottle. Fields marked data-for only show for that tab ((cellar or consumed)). -->
@@ -100,6 +101,10 @@
             <select id="f-colour" name="colour"><option value="">Not set</option></select></div>
           <div class="field"><label for="f-grape">Grape</label>
             <input id="f-grape" name="grape" autocomplete="off" list="grapes" placeholder="Pinot Noir"></div>
+        </div>
+        <div class="grid2">
+          <div class="field"><label for="f-region">Region</label>
+            <input id="f-region" name="region" autocomplete="off" list="regions" placeholder="Burgundy"></div>
         </div>
         <div class="grid2" data-for="cellar">
           <div class="field"><label for="f-window">Drinking window</label>

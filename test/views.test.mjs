@@ -98,3 +98,16 @@ test("list: an on-order bottle has Arrived but no Opened one", () => {
   assert.doesNotMatch(html, /data-act="drink" data-id="g"/);
   assert.match(html, /data-act="arrived" data-id="g">Collected/);
 });
+
+test("region: shown on the entry and the tasting card, and found by search", () => {
+  const cellar = [
+    { id: "k", producer: "Duroche", wine: "Vosne", vintage: 2018, colour: "Red", grape: "Pinot Noir", region: "Burgundy", status: "In cellar" },
+    { id: "c", producer: "Chave", wine: "Hermitage", vintage: 2017, colour: "Red", grape: "Syrah", region: "Rhône", status: "In cellar" },
+  ];
+  const state = { q: "", filter: "All", owner: false, consumed: [], cellar };
+  assert.match(text(listHTML(state)), /Burgundy · Pinot Noir · Red/);
+  const found = listHTML({ ...state, q: "rhone" });
+  assert.match(found, /data-id="c"/);
+  assert.doesNotMatch(found, /data-id="k"/);
+  assert.match(text(tastingHTML({ ...cellar[1], consumedOn: "2026-01-01" })), /Region Rhône Grape Syrah · Red/);
+});
