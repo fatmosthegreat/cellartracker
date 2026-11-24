@@ -2,7 +2,7 @@
 // Run with: node --test   (needs Node 22+, which loads these ES modules without a build step)
 import test from "node:test";
 import assert from "node:assert/strict";
-import { historyHTML, tastingHTML, listHTML, timelineHTML, toneOf, FALLBACK_LISTS } from "../js/views.js";
+import { historyHTML, tastingHTML, listHTML, timelineHTML, toneOf, visibilityHTML, statsHTML, FALLBACK_LISTS } from "../js/views.js";
 
 const NOW = new Date(2026, 10, 23);  // 23 Nov 2026
 const drunk = [
@@ -143,4 +143,18 @@ test("search: starting with 'notes' searches only the tasting notes of opened bo
   assert.doesNotMatch(listHTML({ ...state, q: "notes" }), /data-id="c"/);
   assert.match(listHTML({ ...state, q: "corked", filter: "All" }), /data-id="b"/, "a plain search never looks in notes");
   assert.doesNotMatch(listHTML({ ...state, q: "corked", filter: "All" }), /data-id="a"/);
+});
+
+test("settings card: one checkbox per option from the server, ticked when friends see it", () => {
+  const html = visibilityHTML({ options: [{ name: "price", label: "Price" }, { name: "storage", label: "Where it is <b>" }], hidden: ["price"] });
+  assert.match(html, /<input type="checkbox" name="price">\s*<span>Price<\/span>/, "hidden, so unticked");
+  assert.match(html, /<input type="checkbox" name="storage" checked>\s*<span>Where it is &lt;b&gt;<\/span>/, "shown, so ticked; labels escaped");
+});
+
+test("what depends on a hideable field is marked, so the page can drop it when the server hid it", () => {
+  const state = { q: "", filter: "All", owner: false, consumed: drunk, cellar: [{ id: "k", producer: "Duroche", wine: "Vosne", status: "In cellar" }] };
+  assert.match(statsHTML(state), /<span data-needs="price">[^<]*<b>[^<]*<\/b> on the shelf/);
+  assert.match(historyHTML(drunk, NOW), /<span data-needs="price"><b>[^<]*<\/b> spent/);
+  assert.match(listHTML(state), /<span class="price" data-needs="price">/);
+  assert.match(tastingHTML({ producer: "P", wine: "W" }), /<p class="empty" data-needs="tastingNotes">No tasting notes/);
 });

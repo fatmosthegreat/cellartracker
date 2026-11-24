@@ -27,7 +27,7 @@
 <body>
 <div class="wrap">
   <header class="masthead">
-    <p class="eyebrow">Cellar list · Prices paid per bottle</p>
+    <p class="eyebrow">Cellar list<span data-needs="price"> · Prices paid per bottle</span></p>
     <h1 id="title">Cellar</h1>
     <div class="stats" id="stats"></div>
     <p class="demo-note" id="demo-note" hidden>Demo mode: changes reset when you reload. Set <code>apiUrl</code> in <code>js/config.js</code> to use your Google Sheet.</p>
@@ -42,7 +42,7 @@
       <button class="chip" type="button" data-filter="On order" aria-pressed="false">On order</button>
       <button class="chip" type="button" data-filter="Consumed" aria-pressed="false">Consumed</button>
     </div>
-    <input class="search" id="search" type="search" placeholder="Search wines, or “notes …” for tasting notes" aria-label="Search the cellar">
+    <input class="search" id="search" type="search" placeholder="Search, or “notes …”" aria-label="Search the cellar">
   </div>
 
   <main id="list" aria-live="polite"></main>
@@ -51,6 +51,7 @@
     <span id="owner-state"></span>
     <span class="footer-links">
       <button class="linkbtn" id="print-link" type="button">Print the list</button>
+      <button class="linkbtn" id="settings-link" type="button" hidden>⚙️ Settings</button>
       <button class="linkbtn" id="owner-link" type="button">Owner login</button>
     </span>
   </footer>
@@ -182,6 +183,20 @@
       <button type="button" class="btn" id="ts-edit">Edit</button>
       <button type="button" class="btn primary" data-close>Close</button></div>
   </div>
+</dialog>
+
+<!-- ⚙️ Settings: the owner's choices about what friends see. Only shown when logged in, and the
+     server only takes a change from the owner. The options come from Code.gs (HIDEABLE). -->
+<dialog id="settings" aria-labelledby="st-title">
+  <form class="dlg" id="st-form" novalidate>
+    <h3 id="st-title">Settings</h3>
+    <p class="sub">What friends see. Anything unticked is never sent to anyone who isn't logged in.</p>
+    <div class="options" id="st-options"></div>
+    <p class="form-error" role="alert"></p>
+    <div class="dlg-foot"><span class="spacer"></span>
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="submit" class="btn primary" id="st-save">Save</button></div>
+  </form>
 </dialog>
 
 <dialog id="login" aria-labelledby="lg-title">

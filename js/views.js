@@ -48,7 +48,7 @@ export function statsHTML(state) {
     `<span><b>${inCellar}</b> in the cellar</span>`,
     onOrder ? `<span><b>${onOrder}</b> on order</span>` : "",
     `<span><b>${consumed.length}</b> consumed</span>`,
-    `<span><b>${esc(currencyOf(state))}${money(value)}</b> on the shelf</span>`,
+    `<span data-needs="price"><b>${esc(currencyOf(state))}${money(value)}</b> on the shelf</span>`,
   ].join("");
 }
 
@@ -116,6 +116,12 @@ export function matchesSearch(w, q, fields = SEARCH_FIELDS) {
   return fold(q).split(/\s+/).filter(Boolean).every(word => hay.includes(word));
 }
 
+/** ⚙️ Settings: one "show to friends" checkbox per option (from the server), ticked when shown. */
+export function visibilityHTML({ options, hidden }) {
+  return options.map(o => `<label class="check"><input type="checkbox" name="${esc(o.name)}"${hidden.includes(o.name) ? "" : " checked"}>
+    <span>${esc(o.label)}</span></label>`).join("");
+}
+
 export function listHTML(state) {
   const lists = listsOf(state);
   const currency = currencyOf(state);
@@ -165,7 +171,7 @@ export function historyHTML(consumed, now = new Date(), currency = "") {
     <div class="stats">
       <span><b>${consumed.length}</b> consumed</span>
       ${avg === null ? "" : `<span><b>${avg.toFixed(1)}</b> average rating</span>`}
-      <span><b>${esc(currency)}${money(spent)}</b> spent</span>
+      <span data-needs="price"><b>${esc(currency)}${money(spent)}</b> spent</span>
     </div>
     ${facts.length ? `<dl class="history-facts">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>` : ""}
   </div>`;
@@ -184,7 +190,7 @@ export function tastingHTML(w, currency = "", lists = FALLBACK_LISTS) {
     <h3 id="ts-title"><span class="ts-vin" data-tone="${toneOf(w.colour, lists)}">${esc(w.vintage || "NV")}</span> <span class="producer">${esc(w.producer)}</span><br><em class="wname">${esc(w.wine)}</em></h3>
     <p class="ts-rating">${hasRating(w) ? `${esc(w.rating)}<small>/10</small>` : `<small>Not rated</small>`}</p>
     ${facts.length ? `<dl class="ts-facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>` : ""}
-    ${w.notes ? `<p class="ts-notes">${esc(w.notes)}</p>` : `<p class="empty">No tasting notes.</p>`}`;
+    ${w.notes ? `<p class="ts-notes">${esc(w.notes)}</p>` : `<p class="empty" data-needs="tastingNotes">No tasting notes.</p>`}`;
 }
 
 function entryHTML(w, source, owner, lists) {
@@ -235,7 +241,7 @@ function entryHTML(w, source, owner, lists) {
       <div class="line">
         ${title}
         <span class="dots" aria-hidden="true"></span>
-        <span class="price">${w.price !== null && w.price !== undefined ? money(w.price) : "—"}</span>
+        <span class="price" data-needs="price">${w.price !== null && w.price !== undefined ? money(w.price) : "—"}</span>
       </div>
       ${meta.length ? `<div class="meta">${meta.join("")}</div>` : ""}
       ${w.notes ? `<p class="notes">${esc(w.notes)}</p>` : ""}

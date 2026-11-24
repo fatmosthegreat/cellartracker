@@ -3,7 +3,7 @@
 import { config } from "./config.js";
 import { call, isDemo } from "./api.js";
 import { todayISO, bottleCount, esc } from "./format.js";
-import { titleHTML, statsHTML, timelineHTML, listHTML, tastingHTML, FALLBACK_LISTS } from "./views.js";
+import { titleHTML, statsHTML, timelineHTML, listHTML, tastingHTML, visibilityHTML, FALLBACK_LISTS } from "./views.js";
 
 const $ = (sel, el = document) => el.querySelector(sel);
 
@@ -93,6 +93,8 @@ function render() {
     ? `<p class="empty">Opening the cellar…</p>`
     : listHTML(state);
   document.body.classList.toggle("is-owner", state.owner);
+  document.body.dataset.hidden = (state.settings.hidden || []).join(" ");
+  $("#settings-link").hidden = !state.owner;
   $("#owner-link").textContent = state.owner ? "Log out" : "Owner login";
   $("#owner-state").textContent = state.owner ? "Logged in. Bottles tagged Hidden are only visible to you." : "";
   document.querySelectorAll(".chip").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.filter === state.filter)));
@@ -420,6 +422,25 @@ $("#print-link").addEventListener("click", () => {
   render();
   window.addEventListener("afterprint", () => { Object.assign(state, before); render(); }, { once: true });
   window.print();
+});
+
+/* ---------- ⚙️ Settings (owner only) ---------- */
+
+$("#settings-link").addEventListener("click", () => {
+  const visibility = state.settings.visibility;
+  if (!visibility) return toast("The Apps Script is older than this page. Redeploy it (New version) and try again.", true);
+  const form = $("#st-form");
+  $("#st-options").innerHTML = visibilityHTML(visibility);
+  $(".form-error", form).textContent = "";
+  remember($("#settings"));
+  $("#settings").showModal();
+});
+
+$("#st-form").addEventListener("submit", e => {
+  e.preventDefault();
+  const shown = readFields(e.currentTarget);
+  const hide = Object.keys(shown).filter(name => !shown[name]);
+  submitFrom($("#settings"), $("#st-save"), () => run("visibility", { hide }), "Saved. Friends see the change when they next load the page.");
 });
 
 /* ---------- Login ---------- */

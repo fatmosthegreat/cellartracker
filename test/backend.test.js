@@ -1364,7 +1364,7 @@ test('migrate creates the Lists, Settings and Reminders log tabs, and never over
   assert.deepEqual(tab('Lists').rows[0], ['colour', 'colourTone', 'grape', 'region', 'storage']);
   assert.deepEqual(tab('Lists').rows[1].slice(3, 4), ['Burgundy']);
   assert.deepEqual(tab('Lists').rows[1].slice(0, 3), ['Sparkling', 'white', 'Pinot Noir']);
-  assert.deepEqual(tab('Settings').rows.slice(1).map(r => r[0]), ['currency', 'reminderHour', 'closeReminderMonths', 'nudgeDay', 'aiDailyLimit']);
+  assert.deepEqual(tab('Settings').rows.slice(1).map(r => r[0]), ['currency', 'reminderHour', 'closeReminderMonths', 'nudgeDay', 'visibility', 'aiDailyLimit']);
   assert.equal(tab('Reminders log').hidden, true, 'the log tab is hidden');
 
   tab('Lists').rows.push(['Orange', 'white', '', '']);
@@ -1399,16 +1399,85 @@ test('prices accept any currency in front', () => {
   assert.equal(price('USD 80'), 80);
 });
 
+test('friends never get hidden fields: price by default, created and updated always, and not via /exec', () => {
+  const { ok, friend, backend } = freshCellar();
+  const mine = ok('list');
+  assert.ok(mine.cellar.every(w => 'price' in w && 'created' in w), 'the owner sees everything');
+  assert.deepEqual(mine.settings.hidden, []);
+
+  const theirs = friend('list');
+  const fields = [...theirs.cellar, ...theirs.consumed].flatMap(w => Object.keys(w));
+  for (const f of ['price', 'created', 'updated']) assert.ok(!fields.includes(f), f + ' is never sent to friends');
+  assert.ok(fields.includes('notes') && fields.includes('window') && fields.includes('purchased'), 'everything else is');
+  assert.deepEqual(theirs.settings, { currency: 'S$', hidden: ['price'] }, 'no options, no reminder settings');
+
+  const exec = JSON.parse(backend.doGet().getContent());
+  assert.ok(![...exec.cellar, ...exec.consumed].some(w => 'price' in w), 'the raw /exec URL is the friend view');
+  assert.ok(ok('list').cellar.some(w => w.price === 152), 'the sheet still has the prices');
+});
+
+test('⚙️ Settings: only the owner can change what friends see, and only to known options', () => {
+  const { ok, owner, friend, tab } = freshCellar();
+  const options = ok('list').settings.visibility.options.map(o => o.name);
+  assert.deepEqual(options, ['price', 'storage', 'order', 'cellarNotes', 'tastingNotes']);
+
+  // Hide where it is, order details and both kinds of notes; show the price.
+  const gros = ok('list').cellar.find(w => w.producer === 'A F Gros');
+  ok('update', { id: gros.id, wine: { collectBy: '2026-12-05', collectTime: '15:00', notes: 'magnum' } });
+  const drunk = ok('list').consumed[0];
+  ok('update', { id: drunk.id, wine: { notes: 'Corked' } });
+  const res = ok('visibility', { hide: ['tastingNotes', 'storage', 'order', 'cellarNotes'] });
+  assert.deepEqual(res.result.hidden, ['storage', 'order', 'cellarNotes', 'tastingNotes'], 'kept in a fixed order');
+  assert.deepEqual(res.settings.visibility.hidden, ['storage', 'order', 'cellarNotes', 'tastingNotes']);
+  const row = tab('Settings').rows.find(r => r[0] === 'visibility');
+  assert.equal(row[1], 'storage, order, cellarNotes, tastingNotes', 'saved in the Settings tab');
+
+  const theirs = friend('list');
+  const g = theirs.cellar.find(w => w.producer === 'A F Gros');
+  for (const f of ['storage', 'arrival', 'collectBy', 'collectTime', 'notes']) assert.ok(!(f in g), f + ' hidden');
+  assert.equal(g.price, 54, 'price is shown now');
+  assert.ok(!('notes' in theirs.consumed[0]), 'tasting notes hidden');
+  assert.equal(theirs.consumed[0].price, 88);
+  assert.deepEqual(theirs.settings.hidden, ['storage', 'order', 'cellarNotes', 'tastingNotes']);
+
+  // Nothing hidden is saved as "none", so the default (price) doesn't come back.
+  ok('visibility', { hide: [] });
+  assert.equal(tab('Settings').rows.find(r => r[0] === 'visibility')[1], 'none');
+  assert.equal(friend('list').cellar.find(w => w.producer === 'A F Gros').storage, 'Grand Cru, collect Fri 27 Nov');
+
+  // Not logged in: refused, nothing saved. Unknown names are refused too, whatever the page sends.
+  const refused = friend('visibility', { hide: ['price'] });
+  assert.equal(refused.auth, false);
+  assert.equal(tab('Settings').rows.find(r => r[0] === 'visibility')[1], 'none');
+  for (const bad of [['colour'], ['toString'], 'price', [1]]) {
+    assert.match(String(owner('visibility', { hide: bad }).error), /visibility options aren't known/);
+  }
+  assert.equal(tab('Settings').rows.find(r => r[0] === 'visibility')[1], 'none');
+});
+
+test('a visibility row typed by hand: bad names fall back to the default and status() says so', () => {
+  const { tab, friend, backend } = freshCellar();
+  setSetting(tab, 'visibility', 'price, colour');
+  assert.deepEqual(friend('list').settings.hidden, ['price']);
+  assert.match(backend.status().join('\n'), /visibility "price, colour" isn't valid/);
+  setSetting(tab, 'visibility', ' Storage ');
+  assert.deepEqual(friend('list').settings.hidden, ['price'], 'names are matched exactly');
+  setSetting(tab, 'visibility', 'storage,tastingNotes');
+  assert.deepEqual(friend('list').settings.hidden, ['storage', 'tastingNotes']);
+});
+
 test('Settings drive the currency and reminder timing; bad values fall back and status() says so', () => {
   const { backend, tab, ok, say, sent } = freshBot();
   setSetting(tab, 'currency', '€');
   setSetting(tab, 'closeReminderMonths', '3');
   setSetting(tab, 'nudgeDay', 'tuesday');
   setSetting(tab, 'reminderHour', '25');
-  // The page gets only the currency, logged in or not; the rest stays in Apps Script.
-  assert.deepEqual(ok('list').settings, { currency: '€' });
-  assert.deepEqual(backend.handle_({ action: 'list' }).settings, { currency: '€' });
-  assert.match(backend.status().join('\n'), /Settings tab: currency €, reminderHour 9, closeReminderMonths 3, nudgeDay Tuesday, aiDailyLimit 100/);
+  // The page gets the currency and what's hidden from it; reminder timing and the AI limit stay in Apps Script.
+  const mine = ok('list').settings;
+  assert.deepEqual(Object.keys(mine), ['currency', 'hidden', 'visibility']);
+  assert.equal(mine.currency, '€');
+  assert.deepEqual(backend.handle_({ action: 'list' }).settings, { currency: '€', hidden: ['price'] });
+  assert.match(backend.status().join('\n'), /Settings tab: currency €, reminderHour 9, closeReminderMonths 3, nudgeDay Tuesday, visibility price, aiDailyLimit 100/);
   const s = { currency: '€', reminderHour: 9, closeReminderMonths: 3, nudgeDay: 'Tuesday', aiDailyLimit: 100 };
   assert.match(sent(say('/stats')), /€809/);
 
@@ -1589,6 +1658,30 @@ test('the join phrase: wrong guesses are limited, no phrase means no joins, and 
   assert.deepEqual(guests(), ['999']);
   assert.match(sent(tap(remove)), /Removed/);
   assert.deepEqual(guests(), []);
+});
+
+test('afterDeploy runs migrate, updateBotMenu and status in turn, and stops at the first that fails', () => {
+  const { backend, gas, tab } = freshBot();
+  backend.installTelegram();
+  gas._replies.getMyCommands = () => ({ ok: true, result: [] });
+  gas._replies.exec = () => ({ ok: true, build: backend.BUILD });
+  tab('Cellar').rows[0].pop();  // a column missing, as after a new SCHEMA field
+  gas._fetches.length = 0;
+  const out = backend.afterDeploy().join('\n');
+  assert.match(out, /Web app: running this build/, 'status ran last, and its report is returned');
+  assert.ok(gas._fetches.some(f => f.method === 'setMyCommands'), 'the menu was updated');
+  assert.ok(tab('Cellar').rows[0].includes(backend.SCHEMA.Cellar.at(-1)), 'migrate added the column back');
+
+  // A failing step stops the rest.
+  gas.PropertiesService.getScriptProperties().deleteProperty('TELEGRAM_CHAT_ID');
+  gas._fetches.length = 0;
+  assert.throws(() => backend.afterDeploy(), /Stopped at updateBotMenu/);
+  assert.ok(!gas._fetches.some(f => f.method === 'exec'), 'status didn\'t run');
+
+  // Without Telegram, the menu step is skipped, not failed.
+  const plain = freshCellar();
+  plain.gas._replies.exec = () => ({ ok: true, build: plain.backend.BUILD });
+  assert.match(plain.backend.afterDeploy().join('\n'), /Web app: running this build/);
 });
 
 test('status() checks the deployed build, hides secrets and lists timers', () => {

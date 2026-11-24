@@ -18,6 +18,7 @@
  * Lists:      colours, grapes, regions and storage places live in the "Lists" tab; currency and reminder
  *             timing in the "Settings" tab. migrate() creates both. Edit them in the sheet.
  * Check-up:   status() shows the stored settings, timers and whether the web app runs this build.
+ * Each update: paste this file, Deploy → Manage deployments → New version, then run afterDeploy().
  * Tests:      `node --test` in the repo runs this file against an in-memory sheet.
  *
  * Written for the Apps Script V8 runtime. Avoids ?. and ?? to stay on safe syntax.
@@ -27,7 +28,7 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-24.14';
+const BUILD = '2026-11-24.16';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
@@ -88,6 +89,19 @@ const DEFAULT_LISTS = {
   storage: [],
 };
 
+// What the owner can hide from friends (anyone not logged in). The Settings tab's `visibility` row
+// lists the hidden ones; ⚙️ Settings on the page changes it. Each option names the columns it
+// strips, per tab. Everything not listed here is always shown.
+const HIDEABLE = {
+  price: { label: 'Price', fields: { Cellar: ['price'], Consumed: ['price'] } },
+  storage: { label: 'Where it is', fields: { Cellar: ['storage'] } },
+  order: { label: 'Order details (collect or delivery, due date and time)', fields: { Cellar: ['arrival', 'collectBy', 'collectTime'] } },
+  cellarNotes: { label: 'Cellar notes', fields: { Cellar: ['notes'] } },
+  tastingNotes: { label: 'Tasting notes', fields: { Consumed: ['notes'] } },
+};
+// Never sent to friends: the page doesn't use them.
+const OWNER_ONLY_FIELDS = ['created', 'updated'];
+
 const SETTINGS = {
   currency: { value: 'S$', about: 'Shown before prices on the page and in Telegram',
     check: function (v) { return v.length <= 6 ? v : null; } },
@@ -100,6 +114,8 @@ const SETTINGS = {
       const day = WEEKDAYS.filter(function (d) { return d.toLowerCase() === String(v).toLowerCase(); })[0];
       return day || (String(v).toLowerCase() === 'none' ? 'none' : null);
     } },
+  visibility: { value: ['price'], about: 'What friends don\'t see: any of ' + Object.keys(HIDEABLE).join(', ') +
+    ', or none. Change it from ⚙️ Settings on the page', check: hiddenList_ },
   aiDailyLimit: { value: 100, about: 'Most AI look-ups (bot and website together) in one day, so a leaked passkey or a stuck loop can\'t run up the bill',
     check: function (v) { const n = Number(v); return Number.isInteger(n) && n >= 0 && n <= 1000 ? n : null; } },
 };
@@ -128,6 +144,7 @@ const ROUTES = {
   drink: { auth: true, write: true, run: function (req) { return drinkWine_(req.id, req.drink); } },
   arrived: { auth: true, write: true, run: function (req) { return arriveWine_(req.id); } },
   identify: { auth: true, run: function (req) { return identifyFromPage_(req.identify); } },
+  visibility: { auth: true, write: true, run: function (req) { return setVisibility_(req.hide); } },
 };
 
 /* ============================== Setup (run from the editor) ============================== */
@@ -256,11 +273,9 @@ function handle_(req) {
     const result = route.write ? withLock_(function () { return route.run(req); }) : route.run(req);
     const snap = snapshot_(owner);
     const look = lookups_();
-    // The page only uses the currency. The other settings (reminder timing, AI limit) are used only
-    // here in Apps Script, so they're never sent to the browser.
     return {
       ok: true, apiVersion: API_VERSION, build: BUILD, owner: owner, result: result,
-      cellar: snap.cellar, consumed: snap.consumed, lists: look.lists, settings: { currency: look.settings.currency },
+      cellar: snap.cellar, consumed: snap.consumed, lists: look.lists, settings: pageSettings_(owner),
     };
   } catch (err) {
     // Messages thrown here on purpose ("Price must be a number…") are plain Errors, written for
@@ -378,10 +393,67 @@ function drinkWine_(id, input) {
   return { consumedIds: ids, left: left };
 }
 
+// Friends get no hidden bottles, and none of the fields the owner hides (nor OWNER_ONLY_FIELDS).
+// This is what keeps hidden data off the page and out of the /exec URL.
 function snapshot_(owner) {
-  const visible = function (rec) { return owner || !rec.hidden; };
-  const recs = function (name) { return readRows_(table_(name)).map(function (r) { return r.rec; }).filter(visible); };
+  const hidden = hiddenFrom_(owner);
+  const recs = function (name) {
+    const drop = owner ? [] : OWNER_ONLY_FIELDS.concat(hiddenFields_(name, hidden));
+    return readRows_(table_(name)).map(function (r) { return r.rec; })
+      .filter(function (rec) { return owner || !rec.hidden; })
+      .map(function (rec) { return without_(rec, drop); });
+  };
   return { cellar: recs('Cellar'), consumed: recs('Consumed') };
+}
+
+/* ---------- What friends can see ---------- */
+
+// The visibility names hidden from this viewer: none for the owner.
+function hiddenFrom_(owner) { return owner ? [] : lookups_().settings.visibility; }
+
+// The columns of `tab` that the hidden options strip.
+function hiddenFields_(tab, hidden) {
+  return hidden.reduce(function (all, name) { return all.concat(HIDEABLE[name].fields[tab] || []); }, []);
+}
+
+// A copy of `rec` without `fields` (the cached row is left as it is).
+function without_(rec, fields) {
+  const out = Object.assign({}, rec);
+  fields.forEach(function (f) { delete out[f]; });
+  return out;
+}
+
+function isHideable_(name) { return typeof name === 'string' && Object.prototype.hasOwnProperty.call(HIDEABLE, name); }
+
+// The Settings tab's text ("price, tastingNotes", or "none") → the list of names, or null if a
+// name isn't an option (lookups_ then reports it and keeps the default).
+function hiddenList_(text) {
+  const s = trim_(text);
+  if (s.toLowerCase() === 'none') return [];
+  const names = s.split(',').map(trim_).filter(Boolean);
+  return names.every(isHideable_) ? names : null;
+}
+
+// The `visibility` route: `hide` is the list of names to hide from friends. Checked against
+// HIDEABLE whatever the page sent, and saved in the Settings tab.
+function setVisibility_(hide) {
+  if (!Array.isArray(hide) || !hide.every(isHideable_)) throw new Error('Those visibility options aren\'t known. Reload the page.');
+  const names = Object.keys(HIDEABLE).filter(function (n) { return hide.indexOf(n) >= 0; });
+  writeSetting_('visibility', names.length ? names.join(', ') : 'none');
+  return { hidden: names };
+}
+
+// What the page gets from the Settings tab. `hidden` is what's hidden from this viewer, so the page
+// can drop the empty spots; the owner also gets every option, for the ⚙️ Settings card. Reminder
+// timing and the AI limit are only used here in Apps Script, so they're never sent.
+function pageSettings_(owner) {
+  const s = lookups_().settings;
+  const out = { currency: s.currency, hidden: hiddenFrom_(owner) };
+  if (owner) {
+    out.visibility = { hidden: s.visibility,
+      options: Object.keys(HIDEABLE).map(function (n) { return { name: n, label: HIDEABLE[n].label }; }) };
+  }
+  return out;
 }
 
 /* ============================== Validation ============================== */
@@ -566,18 +638,9 @@ function rowFor_(t, row, id) {
 // `problems` lists settings that were ignored; status() shows them.
 function lookups_() {
   if (READS_.lookups) return READS_.lookups;
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const read = function (name) {
-    const sh = ss.getSheetByName(name);
-    if (!sh || sh.getLastRow() < 1) return null;
-    const v = sh.getRange(1, 1, sh.getLastRow(), Math.max(sh.getLastColumn(), 1)).getDisplayValues();
-    const head = v[0].map(function (h) { return trim_(h).toLowerCase(); });
-    return { rows: v.slice(1), at: function (h) { return head.indexOf(h.toLowerCase()); } };
-  };
-
   const lists = { colours: DEFAULT_LISTS.colours, grapes: DEFAULT_LISTS.grapes, regions: DEFAULT_LISTS.regions,
     storage: DEFAULT_LISTS.storage };
-  const l = read(LOOKUP_TABS.lists);
+  const l = lookupTab_(LOOKUP_TABS.lists);
   if (l) {
     const column = function (h) {
       const i = l.at(h);
@@ -599,7 +662,7 @@ function lookups_() {
   const settings = {};
   const problems = [];
   Object.keys(SETTINGS).forEach(function (k) { settings[k] = SETTINGS[k].value; });
-  const s = read(LOOKUP_TABS.settings);
+  const s = lookupTab_(LOOKUP_TABS.settings);
   if (s && s.at('setting') >= 0 && s.at('value') >= 0) {
     s.rows.forEach(function (r) {
       const key = trim_(r[s.at('setting')]);
@@ -612,6 +675,35 @@ function lookups_() {
   }
   READS_.lookups = { lists: lists, settings: settings, problems: problems };
   return READS_.lookups;
+}
+
+// Saves one setting's value in the Settings tab, adding its row (with the `about` text) if it's
+// missing. Run under the lock (a `write` route); the next lookups_() reads it again.
+function writeSetting_(key, value) {
+  const t = lookupTab_(LOOKUP_TABS.settings);
+  if (!t || t.at('setting') < 0 || t.at('value') < 0) throw new Error('The Settings tab is missing. Run migrate() in the script editor.');
+  const found = t.rows.map(function (r) { return trim_(r[t.at('setting')]); }).indexOf(key);
+  if (found >= 0) {
+    t.sh.getRange(found + 2, t.at('value') + 1, 1, 1).setNumberFormat('@').setValues([[value]]);
+  } else {
+    const row = [];
+    for (let i = 0; i < t.width; i++) row.push('');
+    row[t.at('setting')] = key;
+    row[t.at('value')] = value;
+    if (t.at('about') >= 0) row[t.at('about')] = SETTINGS[key].about;
+    t.sh.getRange(t.rows.length + 2, 1, 1, t.width).setNumberFormat('@').setValues([row]);
+  }
+  delete READS_.lookups;
+}
+
+// A Lists or Settings tab: its rows (below the header), the sheet, and at(header) → the column
+// index (0-based, ignoring case), or -1. null if the tab is missing or empty.
+function lookupTab_(name) {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+  if (!sh || sh.getLastRow() < 1) return null;
+  const v = sh.getRange(1, 1, sh.getLastRow(), Math.max(sh.getLastColumn(), 1)).getDisplayValues();
+  const head = v[0].map(function (h) { return trim_(h).toLowerCase(); });
+  return { sh: sh, width: head.length, rows: v.slice(1), at: function (h) { return head.indexOf(h.toLowerCase()); } };
 }
 
 /* ============================== Passkey ============================== */
@@ -904,6 +996,29 @@ function status() {
     look.lists.regions.length + ' regions, ' + look.lists.storage.length + ' storage places.');
 
   Logger.log(out.join('\n'));
+  return out;
+}
+
+// Run this after pasting this file and deploying a New version. It runs migrate() (adds any new
+// columns), updateBotMenu() (Telegram's / menu; skipped if the bot isn't set up), then status()
+// (checks the web app runs this build), each only if the one before worked. An error stops it,
+// and says which step it was. The three can still be run on their own.
+function afterDeploy() {
+  const telegram = !!PropertiesService.getScriptProperties().getProperty('TELEGRAM_TOKEN');
+  const steps = [['migrate', migrate], ['updateBotMenu', telegram ? updateBotMenu : null], ['status', status]];
+  let out = null;
+  steps.forEach(function (step) {
+    if (!step[1]) {
+      Logger.log('Skipped ' + step[0] + ': the Telegram bot isn\'t set up.');
+      return;
+    }
+    try {
+      out = step[1]();
+    } catch (err) {
+      throw new Error('Stopped at ' + step[0] + ' (the steps after it didn\'t run): ' + ((err && err.message) || err));
+    }
+    Logger.log('✓ ' + step[0]);
+  });
   return out;
 }
 

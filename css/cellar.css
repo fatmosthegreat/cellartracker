@@ -221,6 +221,11 @@ details[open] summary { margin-bottom: 12px; }
 .check { display: flex; gap: 10px; align-items: flex-start; font-size: .9rem; }
 .check input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--claret); }
 .check small { display: block; color: var(--muted); }
+.options { display: grid; gap: 12px; margin: 14px 0; }
+/* What the server hid from a friend never arrives; these drop the empty spot it would leave.
+   body[data-hidden] lists the hidden names (js/app.js); [data-needs] marks what depends on one. */
+[data-hidden~="price"] [data-needs~="price"],
+[data-hidden~="tastingNotes"] [data-needs~="tastingNotes"] { display: none; }
 .dlg-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .dlg-foot .spacer { flex: 1; }
 .form-error { color: var(--late); font-size: .88rem; margin: 0; }
