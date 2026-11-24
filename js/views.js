@@ -200,7 +200,7 @@ function entryHTML(w, source, owner, lists) {
       <button class="btn" type="button" data-act="edit" data-id="${id}">Edit</button>
       ${source === "cellar" ? `<button class="btn" type="button" data-act="more" data-id="${id}">+1 bottle</button>` : ""}
       ${source === "cellar" && w.status === "On order" ? `<button class="btn" type="button" data-act="arrived" data-id="${id}">${{ Collect: "Collected", Delivery: "Delivered" }[w.arrival] || "Arrived"}</button>` : ""}
-      ${source === "cellar" ? `<button class="btn" type="button" data-act="drink" data-id="${id}">Opened one</button>` : ""}
+      ${source === "cellar" && w.status === "In cellar" ? `<button class="btn" type="button" data-act="drink" data-id="${id}">Opened one</button>` : ""}
     </div>`;
 
   // Consumed bottles open their tasting card: the title is a button for keyboards, and app.js

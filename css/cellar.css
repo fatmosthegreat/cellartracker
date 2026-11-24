@@ -11,7 +11,7 @@
   --claret: #7A1D32;
   --on-claret: #FFFFFF;
   --straw: #B8962F;
-  --rose: #CF7F86;
+  --rose: #E8957A;
   --ok: #2E6A4E;
   --hold: #8A6512;
   --late: #9B3434;
@@ -29,7 +29,7 @@
     --claret: #E08398;
     --on-claret: #1A1012;
     --straw: #D8BC66;
-    --rose: #E6A3A9;
+    --rose: #F2A88E;
     --ok: #7CC3A0;
     --hold: #E0B357;
     --late: #EE8A80;
@@ -302,7 +302,7 @@ details[open] summary { margin-bottom: 12px; }
   /* Always the light palette, even when the screen is in dark mode. */
   :root {
     --paper: #FFFFFF; --surface: #FFFFFF; --ink: #1F1B1C; --muted: #5E5755; --rule: #CFC9C0;
-    --claret: #7A1D32; --straw: #9A7A1E; --rose: #B8646C; color-scheme: light;
+    --claret: #7A1D32; --straw: #9A7A1E; --rose: #D9876C; color-scheme: light;
   }
   @page { margin: 16mm 14mm; }
   body { background: #fff; font-size: 11pt; }

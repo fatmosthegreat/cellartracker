@@ -441,6 +441,36 @@ test('/opened shows buttons, asks before opening, and Yes drinks it exactly like
   assert.match(sent(say('/opened nothing-like-this')), /Nothing matches/);
 });
 
+test('only bottles in the cellar can be opened: /opened leaves out orders, and the server refuses them', () => {
+  const { say, sent, buttons, ok, owner } = freshBot();
+  const all = buttons(say('/opened')).map(b => b.text);
+  assert.equal(all.length, 4, 'every bottle in the cellar is listed');
+  assert.ok(!all.some(t => /Gros/.test(t)), 'not the one on order');
+  assert.equal(buttons(say('/opened jadot')).length, 1, 'a search still narrows the list');
+  assert.match(sent(say('/opened gros')), /Nothing matches/);
+
+  const order = ok('list').cellar.find(w => w.status === 'On order');
+  assert.match(owner('drink', { id: order.id }).error, /still on order/, 'a request made by hand is refused too');
+  assert.equal(ok('list').consumed.length, 1, 'nothing was opened');
+});
+
+test('Claude is only called to read a wine: one call to claude_, from readWine_, and one API address', () => {
+  const count = re => (CODE.match(re) || []).length;
+  const rule = 'Claude may only be called to read a label or a typed wine name (see CLAUDE.md).';
+  assert.equal(count(/\bclaude_\(/g), 2, 'claude_ is defined once and called once, in readWine_. ' + rule);
+  assert.match(CODE, /function readWine_[\s\S]*?return claude_\(/);
+  assert.equal(count(/\breadWine_\(/g), 2, 'readWine_ is defined once and called once, in identifyWine_. ' + rule);
+  assert.equal(count(/api\.anthropic\.com/g), 1, 'nothing calls the API without claude_ and its daily limit. ' + rule);
+});
+
+test('the reader keeps vineyard articles like En and Les', () => {
+  const c = labelBot();
+  c.ok('identify', { identify: { text: 'something' } });
+  const system = c.gas._fetches.find(f => f.method === 'anthropic').payload.system;
+  assert.match(system, /Keep every word of a vineyard name, including a leading En, Les/);
+  assert.match(system, /En Orveaux/);
+});
+
 test('a failed tap acknowledgement still replaces the buttons, so a bottle is never drunk twice', () => {
   const { say, tap, sent, buttons, gas } = freshBot();
   const btn = buttons(say('/opened jadot'))[0];
@@ -1118,6 +1148,7 @@ test('Collect by is a date, and is not carried into Drunk', () => {
   assert.match(owner('update', { id: w.id, wine: { collectBy: 'Friday' } }).error, /Due by must be a date/);
   ok('update', { id: w.id, wine: { collectBy: '2026-11-27' } });
   assert.equal(ok('list').cellar.find(x => x.id === w.id).collectBy, '2026-11-27');
+  ok('update', { id: w.id, wine: { status: 'In cellar' } });  // only bottles in the cellar can be opened
   const res = ok('drink', { id: w.id });
   assert.equal('collectBy' in res.consumed.at(-1), false);
   const drunk = tab('Consumed');
@@ -1171,8 +1202,11 @@ test('Settings drive the currency and reminder timing; bad values fall back and 
   setSetting(tab, 'closeReminderMonths', '3');
   setSetting(tab, 'nudgeDay', 'tuesday');
   setSetting(tab, 'reminderHour', '25');
-  const s = ok('list').settings;
-  assert.deepEqual(s, { currency: '€', reminderHour: 9, closeReminderMonths: 3, nudgeDay: 'Tuesday', aiDailyLimit: 100 });
+  // The page gets only the currency, logged in or not; the rest stays in Apps Script.
+  assert.deepEqual(ok('list').settings, { currency: '€' });
+  assert.deepEqual(backend.handle_({ action: 'list' }).settings, { currency: '€' });
+  assert.match(backend.status().join('\n'), /Settings tab: currency €, reminderHour 9, closeReminderMonths 3, nudgeDay Tuesday, aiDailyLimit 100/);
+  const s = { currency: '€', reminderHour: 9, closeReminderMonths: 3, nudgeDay: 'Tuesday', aiDailyLimit: 100 };
   assert.match(sent(say('/stats')), /€809/);
 
   const keys = (recs, today) => backend.remindersDue_(recs, today, {}, s).map(r => r.key);

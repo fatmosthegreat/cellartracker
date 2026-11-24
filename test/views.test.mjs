@@ -87,3 +87,14 @@ test("list: drunk bottles open their card, cellar bottles don't; history only wi
   assert.match(html, /class="history"/);
   assert.doesNotMatch(listHTML({ ...state, q: "jadot" }), /class="history"/);
 });
+
+test("list: an on-order bottle has Arrived but no Opened one", () => {
+  const cellar = [
+    { id: "k", producer: "Duroche", wine: "Vosne", vintage: 2018, status: "In cellar" },
+    { id: "g", producer: "Gros", wine: "Moulin-à-Vent", vintage: 2022, status: "On order", arrival: "Collect" },
+  ];
+  const html = listHTML({ q: "", filter: "All", owner: true, consumed: [], cellar });
+  assert.match(html, /data-act="drink" data-id="k"/);
+  assert.doesNotMatch(html, /data-act="drink" data-id="g"/);
+  assert.match(html, /data-act="arrived" data-id="g">Collected/);
+});
