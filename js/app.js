@@ -492,7 +492,7 @@ $("#list").addEventListener("click", async e => {
     }
     if (act === "arrived") {
       const before = { status: wine.status, storage: wine.storage || null };
-      await run("update", { id: wine.id, wine: { status: "In cellar", storage: null } });
+      await run("arrived", { id: wine.id });  // same as the bot's /arrived (Code.gs arriveWine_)
       toast("Moved into the cellar", false, () => run("update", { id: wine.id, wine: before }));
     }
   } catch (err) {
