@@ -27,7 +27,7 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-24.8';
+const BUILD = '2026-11-24.9';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
@@ -1073,13 +1073,14 @@ const TG_COMMANDS = {
   onorder: { menu: true, help: 'Bottles on order', run: function (q, recs) {
     const due = recs.filter(function (w) { return w.status === 'On order'; });
     if (!due.length) return { text: 'Nothing on order.' };
-    return { text: '<b>On order</b>\n\n' + due.map(function (w) {
+    return { text: '<b>On order</b>\n' + due.map(function (w) {
       const say = arrival_(w);
       return bottleLine_(w) + (w.collectBy ? '\n' + say.due + ' ' + niceDate_(w.collectBy) : w.arrival ? '\n' + w.arrival : '') +
         (w.storage ? '\n' + escH_(w.storage) : '');
     }).join('\n\n') };
   } },
-  search: { menu: true, help: 'Find a bottle, e.g. /search romanee', run: function (q, recs) {
+  // Off the menu: any message that isn't a command is already a search (it runs as /search).
+  search: { help: 'Find a bottle, e.g. /search romanee', run: function (q, recs) {
     if (!q) return { text: 'Type what to look for, e.g. /search romanee' };
     return { text: listText_('Matches for “' + escH_(q) + '”', searchRecs_(recs, q), 'Nothing in the cellar matches “' + escH_(q) + '”.') };
   } },
@@ -1095,7 +1096,21 @@ const TG_COMMANDS = {
       '<b>' + escH_(lookups_().settings.currency) + money_(value) + '</b> on the shelf',
     ].join('\n') };
   } },
-  // `owner` commands change the cellar, so guests can't use them.
+  // `owner` commands change the cellar or show what only the owner sees, so guests can't use them.
+  value: { menu: true, owner: true, help: 'What the cellar is worth, e.g. /value burgundy', run: function (q, recs) {
+    return { text: valueText_(q ? searchRecs_(recs, q) : recs, q) };
+  } },
+  notes: { menu: true, owner: true, help: 'Search your tasting notes, e.g. /notes corked', run: function (q) {
+    if (!q) return { text: 'Type what to look for in your tasting notes, e.g. /notes corked' };
+    const opened = searchRecs_(readRows_(table_('Consumed')).map(function (r) { return r.rec; }), q, ['notes'])
+      .sort(function (a, b) { return String(b.consumedOn || '').localeCompare(String(a.consumedOn || '')); });
+    if (!opened.length) return { text: 'No tasting notes match “' + escH_(q) + '”.' };
+    return { text: '<b>Tasting notes with “' + escH_(q) + '”</b>\n' + opened.map(function (w) {
+      return bottleLine_(w, true) + (w.consumedOn ? ' · opened ' + niceDate_(w.consumedOn) : '') +
+        (w.rating !== null && w.rating !== undefined && w.rating !== '' ? ' · ' + escH_(w.rating) + '/10' : '') +
+        '\n<i>' + escH_(w.notes) + '</i>';
+    }).join('\n\n') };
+  } },
   opened: { menu: true, owner: true, help: 'Record a bottle you opened', run: function (q, recs) {
     return pickBottle_('drink', q, recs.filter(function (w) { return w.status === 'In cellar'; }), 'Which one did you open?');
   } },
@@ -1230,7 +1245,7 @@ function answerTelegram_(update, msg, chatId, guest, props) {
   const cmd = TG_COMMANDS[name];
   try {
     if (!cmd) throw new Error('I don\'t know /' + name + '. Try /help.');
-    if (guest && cmd.owner) throw new Error('Only the owner can change the cellar.');
+    if (guest && cmd.owner) throw new Error('Only the owner can use /' + name + '.');
     const reply = cmd.run(arg, cellarRecs_(guest), guest, chatId);
     if (reply) telegramSendLong_(reply.text, reply.buttons, chatId);  // /add sends its own messages
   } catch (err) {
@@ -1262,13 +1277,37 @@ function cellarText_(recs) {
     if (!list.length) return '';
     const n = list.reduce(function (a, w) { return a + (w.bottles || 1); }, 0);
     return '<b>' + (status === 'In cellar' ? 'In the cellar' : 'On order') + '</b> · ' + n + ' bottle' + (n === 1 ? '' : 's') + '\n' +
-      list.map(function (w) { return bottleLine_(w); }).join('\n');
+      list.map(countLine_).join('\n\n');
   }).filter(Boolean).join('\n\n');
 }
 
+// Every list of wines the bot sends: the title right above the first wine, a blank line between wines.
 function listText_(title, recs, empty, keepOrder) {
   if (!recs.length) return empty;
-  return '<b>' + title + '</b>\n' + (keepOrder ? recs : sortCellar_(recs)).map(function (w) { return bottleLine_(w); }).join('\n');
+  return '<b>' + title + '</b>\n' + (keepOrder ? recs : sortCellar_(recs)).map(function (w) { return bottleLine_(w); }).join('\n\n');
+}
+
+// "1x 2018 Domaine Duroche Vosne-Romanée"
+function countLine_(w) {
+  return (w.bottles || 1) + 'x ' + escH_(w.vintage || 'NV') + ' ' + escH_(w.producer) + ' ' + escH_(w.wine);
+}
+
+// /value: each wine with what it cost, and the total on the last line. Bottles without a price
+// are listed but left out of the total, and the total says how many.
+function valueText_(recs, q) {
+  if (!recs.length) return q ? 'Nothing in the cellar matches “' + escH_(q) + '”.' : 'The cellar is empty.';
+  const cur = escH_(lookups_().settings.currency);
+  let total = 0, bottles = 0, unpriced = 0;
+  const lines = sortCellar_(recs).map(function (w) {
+    const n = w.bottles || 1;
+    const priced = typeof w.price === 'number';
+    if (priced) { total += w.price * n; bottles += n; } else unpriced += n;
+    return countLine_(w) + ' · ' + (priced ? cur + money_(w.price * n) + (n > 1 ? ' (' + cur + money_(w.price) + ' each)' : '') : 'no price') +
+      (w.status === 'On order' ? ' (on order)' : '');
+  });
+  return '<b>' + (q ? 'Value of “' + escH_(q) + '”' : 'Cellar value') + '</b>\n' + lines.join('\n\n') +
+    '\n\n<b>Total: ' + cur + money_(total) + '</b> · ' + bottles + ' bottle' + (bottles === 1 ? '' : 's') +
+    (unpriced ? ' (' + unpriced + ' without a price, not counted)' : '');
 }
 
 // "<b>2018</b> Duroche · <i>Vosne-Romanée</i> ×2 · drink 2024–2035"
@@ -1284,11 +1323,17 @@ function cellarRecs_(guest) {
     .filter(function (w) { return !guest || !w.hidden; }));
 }
 
-// Every word must appear somewhere, ignoring case and accents: "duroche 2018" finds "Duroché … 2018".
-function searchRecs_(recs, q) {
+// The one search rule: every word must appear in one of these fields, ignoring case and accents
+// ("duroche 2018" finds "Duroché … 2018"). Notes are left out, so a note like "drinks like a
+// Burgundy" can't put a Rhône into /value burgundy; /notes searches them on purpose.
+// js/views.js has the website's copy of this rule (it runs in the browser as you type); a test
+// checks the two give the same answers.
+const SEARCH_FIELDS = ['producer', 'wine', 'region', 'grape', 'colour', 'vintage'];
+function searchRecs_(recs, q, fields) {
   const words = fold_(q).split(/\s+/).filter(Boolean);
+  const where = fields || SEARCH_FIELDS;
   return sortCellar_(recs.filter(function (w) {
-    const hay = fold_([w.producer, w.wine, w.region, w.grape, w.vintage, w.colour, w.notes].join(' '));
+    const hay = fold_(where.map(function (f) { return w[f]; }).join(' '));
     return words.every(function (word) { return hay.indexOf(word) >= 0; });
   }));
 }

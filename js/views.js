@@ -104,12 +104,23 @@ function sortFor(status, lists) {
     || (a.vintage || 0) - (b.vintage || 0);
 }
 
+// The search rule, the same as searchRecs_ in Code.gs (a test checks they agree): every word must
+// appear in one of these fields, ignoring case and accents. Notes aren't searched, except by
+// starting the search with "notes" ("notes corked"), like the bot's /notes: then only the tasting
+// notes of opened bottles are searched.
+const SEARCH_FIELDS = ["producer", "wine", "region", "grape", "colour", "vintage"];
+export function matchesSearch(w, q, fields = SEARCH_FIELDS) {
+  const hay = fold(fields.map(f => w[f] ?? "").join(" "));
+  return fold(q).split(/\s+/).filter(Boolean).every(word => hay.includes(word));
+}
+
 export function listHTML(state) {
   const lists = listsOf(state);
   const currency = currencyOf(state);
-  const q = fold(state.q.trim());
-  const matches = w => !q || fold([w.producer, w.wine, w.region, w.grape, w.vintage, w.colour, w.notes].join(" ")).includes(q);
-  const sections = SECTIONS.filter(s => state.filter === "All" || state.filter === s.status);
+  const q = state.q.trim();
+  const notes = /^notes(\s|$)/i.exec(q);
+  const matches = notes ? w => !!w.notes && matchesSearch(w, q.slice(5), ["notes"]) : w => matchesSearch(w, q);
+  const sections = SECTIONS.filter(s => notes ? s.status === "Consumed" : state.filter === "All" || state.filter === s.status);
   let html = "";
   for (const s of sections) {
     const items = state[s.source].filter(w => (s.source === "consumed" || w.status === s.status) && matches(w)).sort(sortFor(s.status, lists));

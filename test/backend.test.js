@@ -399,6 +399,93 @@ test('/cellar lists every bottle by status, and plain text searches ignoring acc
   assert.match(sent(say('/explode')), /I don't know \/explode/);
 });
 
+test('/cellar is one line per wine; every list has its title right above the first wine and a blank line between wines', () => {
+  const { say, sent } = freshBot();
+  const text = sent(say('/cellar'));
+  assert.match(text, /<b>In the cellar<\/b> · 4 bottles\n1x 2022 Leflaive Bourgogne Blanc\n\n1x /);
+  assert.match(text, /\n\n<b>On order<\/b> · 1 bottle\n1x 2023 A F Gros Moulin-à-Vent$/);
+  assert.doesNotMatch(text, /drink 20/, 'no drinking windows in /cellar');
+  assert.match(sent(say('pinot')), /<\/b>\n<b>20\d\d<\/b>[^\n]*\n\n<b>20\d\d<\/b>/);
+  assert.match(sent(say('/onorder')), /<b>On order<\/b>\n<b>2023<\/b> A F Gros/);
+});
+
+test('one search rule: producer, wine, region, grape, colour, vintage, never notes', () => {
+  const { say, sent, ok } = freshBot();
+  const jadot = ok('list').cellar.find(w => w.producer === 'Jadot');
+  ok('update', { id: jadot.id, wine: { notes: 'Tastes like a Rhône' } });
+  assert.doesNotMatch(sent(say('rhone')), /Jadot/, 'notes are not searched');
+  assert.match(sent(say('pinot 2018')), /Duroche[\s\S]*Jadot/, 'every word, in any field');
+  assert.match(sent(say('burgundy white')), /Leflaive/);
+  assert.doesNotMatch(sent(say('burgundy white')), /Jadot/);
+});
+
+test('the website and the bot search the same way', async () => {
+  const { matchesSearch } = await import('../js/views.js');
+  const { backend, ok } = freshCellar();
+  const all = [...ok('list').cellar, ...ok('list').consumed];
+  all[0].notes = 'burgundy pinot romanee';
+  for (const q of ['burgundy', 'pinot 2018', 'romanee', 'ROMANÉE duroche', 'red jadot', 'white', 'shiraz', 'gamay burgundy', '2023', 'nothing']) {
+    const bot = backend.searchRecs_(all, q).map(w => w.id).sort();
+    const web = all.filter(w => matchesSearch(w, q)).map(w => w.id).sort();
+    assert.deepEqual(web, bot, `"${q}" gives the same bottles`);
+  }
+});
+
+test('/notes searches only the tasting notes of opened bottles, newest first; owner-only', () => {
+  const { say, sent, ok, gas } = freshBot();
+  const [a, b] = ok('list').cellar.filter(w => w.status === 'In cellar');
+  ok('drink', { id: a.id, drink: { consumedOn: '2026-03-01', rating: 9, notes: 'Corked, sadly' } });
+  ok('drink', { id: b.id, drink: { consumedOn: '2026-10-01', notes: 'A little corked <b>?' } });
+  const text = sent(say('/notes CORKED'));
+  assert.match(text, /<b>Tasting notes with “CORKED”<\/b>\n/);
+  assert.ok(text.indexOf(b.producer) < text.indexOf(a.producer), 'newest first');
+  assert.match(text, /opened 1 Mar 2026 · 9\/10\n<i>Corked, sadly<\/i>/);
+  assert.match(text, /A little corked &lt;b&gt;\?/);
+  assert.match(sent(say('/notes burgundy')), /No tasting notes match/, 'not other fields');
+  assert.match(sent(say('/notes')), /e\.g\. \/notes corked/);
+
+  gas.PropertiesService.getScriptProperties().setProperties({ TELEGRAM_GUESTS: JSON.stringify([{ id: '555', name: 'Sam' }]) });
+  assert.match(sent(say('/notes corked', '555')), /Only the owner can use \/notes/);
+  assert.doesNotMatch(sent(say('/notes corked', '555')), /Corked/);
+});
+
+test('/value lists each wine with its price and the total last; searches; owner-only', () => {
+  const { say, sent, ok, gas } = freshBot();
+  const text = sent(say('/value'));
+  assert.match(text, /^<b>Cellar value<\/b>\n1x 2022 Leflaive Bourgogne Blanc · S\$150\n\n/);
+  assert.match(text, /1x 2023 A F Gros Moulin-à-Vent · S\$54 \(on order\)/);
+  assert.match(text, /\n\n<b>Total: S\$809<\/b> · 5 bottles$/);
+
+  const jadot = ok('list').cellar.find(w => w.producer === 'Jadot');
+  ok('update', { id: jadot.id, wine: { bottles: 2 } });
+  const duroche = ok('list').cellar.find(w => w.producer === 'Duroche');
+  ok('update', { id: duroche.id, wine: { price: null } });
+  const red = sent(say('/value pinot 2018'));
+  assert.match(red, /^<b>Value of “pinot 2018”<\/b>\n/);
+  assert.match(red, /2x 2018 Jadot Gevrey-Chambertin · S\$280 \(S\$140 each\)/);
+  assert.match(red, /1x 2018 Duroche Vosne-Romanée · no price/);
+  assert.match(red, /<b>Total: S\$280<\/b> · 2 bottles \(1 without a price, not counted\)$/);
+  assert.match(sent(say('/value champagne')), /Nothing in the cellar matches “champagne”/);
+
+  gas.PropertiesService.getScriptProperties().setProperties({ TELEGRAM_GUESTS: JSON.stringify([{ id: '555', name: 'Sam' }]) });
+  const guest = sent(say('/value', '555'));
+  assert.match(guest, /Only the owner can use \/value/);
+  assert.doesNotMatch(guest, /S\$/);
+});
+
+test('/search is off the menu but still works; /value and /notes are only on the owner menu', () => {
+  const { backend, gas } = freshBot();
+  gas._replies.setMyCommands = () => ({ ok: true, result: true });
+  backend.installTelegram();
+  const menus = gas._fetches.filter(f => f.method === 'setMyCommands');
+  const names = m => m.payload.commands.map(c => c.command);
+  const everyone = menus.find(m => !m.payload.scope);
+  const mine = menus.find(m => m.payload.scope);
+  assert.ok(!names(everyone).includes('search') && !names(mine).includes('search'));
+  assert.ok(names(mine).includes('value') && names(mine).includes('notes'));
+  assert.ok(!names(everyone).includes('value') && !names(everyone).includes('notes'));
+});
+
 test('/stats, /onorder and /help answer', () => {
   const { say, sent } = freshBot();
   assert.match(sent(say('/stats')), /<b>4<\/b> in the cellar\n<b>1<\/b> on order\n<b>1<\/b> consumed\n<b>S\$809<\/b> on the shelf/);

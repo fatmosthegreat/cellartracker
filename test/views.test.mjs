@@ -111,3 +111,20 @@ test("region: shown on the entry and the tasting card, and found by search", () 
   assert.doesNotMatch(found, /data-id="k"/);
   assert.match(text(tastingHTML({ ...cellar[1], consumedOn: "2026-01-01" })), /Region Rhône Grape Syrah · Red/);
 });
+
+test("search: starting with 'notes' searches only the tasting notes of opened bottles", () => {
+  const cellar = [{ id: "k", producer: "Duroche", wine: "Vosne", vintage: 2018, status: "In cellar", notes: "corked spare" }];
+  const consumed = [
+    { id: "a", producer: "Jadot", wine: "Gevrey", consumedOn: "2026-11-02", notes: "Corked, sadly" },
+    { id: "b", producer: "Corked Hill", wine: "Red", consumedOn: "2026-10-01", notes: "Lovely" },
+    { id: "c", producer: "Penfolds", wine: "Bin 128", consumedOn: "2026-09-01" },
+  ];
+  const state = { q: "Notes CORKED", filter: "In cellar", owner: false, consumed, cellar };
+  const html = listHTML(state);
+  assert.match(html, /data-id="a"/);
+  assert.doesNotMatch(html, /data-id="[kbc]"/, "not cellar notes, not other fields");
+  assert.match(listHTML({ ...state, q: "notes" }), /data-id="a"[\s\S]*data-id="b"/, "just 'notes' lists every opened bottle with notes");
+  assert.doesNotMatch(listHTML({ ...state, q: "notes" }), /data-id="c"/);
+  assert.match(listHTML({ ...state, q: "corked", filter: "All" }), /data-id="b"/, "a plain search never looks in notes");
+  assert.doesNotMatch(listHTML({ ...state, q: "corked", filter: "All" }), /data-id="a"/);
+});
