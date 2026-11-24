@@ -3,6 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Only this site's own scripts run; data goes only to Apps Script (which redirects to googleusercontent).
+     'unsafe-eval' is for demo mode, which runs Code.gs in the browser; 'unsafe-inline' styles are the
+     timeline's positions; data: images are the favicon and the ✨ photo preview. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; connect-src 'self' https://script.google.com https://script.googleusercontent.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
 <title>Cellar</title>
 <meta name="description" content="A cellar list: what's in the cellar, what's on the way, and what's been opened.">
 <meta name="theme-color" content="#ECEAE4" media="(prefers-color-scheme: light)">

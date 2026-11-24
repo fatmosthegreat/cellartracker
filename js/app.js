@@ -12,7 +12,8 @@ const saved = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode: fine */ } },
   del(k) { try { localStorage.removeItem(k); } catch { /* fine */ } },
 };
-const KEY = "cellar.key";
+const TOKEN = "cellar.token";  // the login token; the passkey itself is never kept
+saved.del("cellar.key");        // older versions kept the passkey here
 const SNAPSHOT = isDemo ? "cellar.demo.snapshot" : "cellar.snapshot";
 
 const state = {
@@ -20,7 +21,7 @@ const state = {
   consumed: [],
   lists: FALLBACK_LISTS,  // colours, grapes, storage places: from the sheet's Lists tab
   settings: {},           // currency etc.: from the sheet's Settings tab
-  key: isDemo ? null : saved.get(KEY),
+  token: isDemo ? null : saved.get(TOKEN),
   owner: false,
   loaded: false,
   filter: "All",
@@ -30,7 +31,7 @@ const state = {
 const snapshot = isDemo ? null : saved.get(SNAPSHOT);
 if (snapshot) {
   Object.assign(state, {
-    cellar: snapshot.cellar || [], consumed: snapshot.consumed || [], owner: !!state.key,
+    cellar: snapshot.cellar || [], consumed: snapshot.consumed || [], owner: !!state.token,
     lists: snapshot.lists || FALLBACK_LISTS, settings: snapshot.settings || {},
   });
 }
@@ -49,7 +50,7 @@ function apply(res) {
 
 async function run(action, payload) {
   try {
-    return apply(await call(action, payload, state.key));
+    return apply(await call(action, payload, state.token && { token: state.token }));
   } catch (err) {
     if (err.auth) logOut();
     throw err;
@@ -67,9 +68,9 @@ async function refresh() {
 }
 
 function logOut() {
-  state.key = null;
+  state.token = null;
   state.owner = false;
-  saved.del(KEY);
+  saved.del(TOKEN);
   saved.del(SNAPSHOT);
   state.cellar = state.cellar.filter(w => !w.hidden);
   state.consumed = state.consumed.filter(w => !w.hidden);
@@ -441,9 +442,10 @@ $("#lg-form").addEventListener("submit", e => {
   const key = e.currentTarget.elements.key.value;
   if (!key) return;
   submitFrom($("#login"), $("#lg-save"), async () => {
-    const res = await call("login", {}, key);
-    state.key = key;
-    if (!isDemo) saved.set(KEY, key);
+    const res = await call("login", {}, { key });
+    if (!res.result || !res.result.token) throw new Error("The Apps Script is older than this page. Redeploy it (New version) and try again.");
+    state.token = res.result.token;
+    if (!isDemo) saved.set(TOKEN, state.token);
     return apply(res);
   }, "Logged in. You can edit now.");
 });

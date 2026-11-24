@@ -10,8 +10,9 @@
  * Columns are matched by header name, so you can reorder them or add your own columns in the
  * sheet; the app leaves columns it doesn't know about alone.
  *
- * First run:  setPassword() → setup() → Deploy as web app.   (See README.md.)
- * Telegram:   setTelegram() → findTelegramChatId() → installTelegram(), then for fast replies
+ * Secrets:    typed only into Project Settings → Script properties, never into this file.
+ * First run:  NEW_PASSKEY property → setPassword() → setup() → Deploy as web app.   (See OWNER.md.)
+ * Telegram:   TELEGRAM_TOKEN property → findTelegramChatId() → installTelegram(), then for fast replies
  *             relaySecret() → Cloudflare Worker → installTelegramRelay().   (Optional; see README.md.)
  * New field:  add it to SCHEMA (and FIELD_RULES if it isn't free text), then run migrate().
  * Lists:      colours, grapes and storage places live in the "Lists" tab; currency and reminder
@@ -26,7 +27,7 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-24.3';
+const BUILD = '2026-11-24.4';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
@@ -110,7 +111,7 @@ const LIST_FIELDS = {
 // Every action the page can call. `auth` needs the passkey; `write` runs under a lock.
 const ROUTES = {
   list: { auth: false, run: function () { return null; } },
-  login: { auth: true, run: function () { return null; } },
+  login: { auth: true, run: function (req) { return { token: makeToken_(req.device) }; } },
   create: { auth: true, write: true, run: function (req) { return createWine_(req.wine); } },
   update: { auth: true, write: true, run: function (req) { return updateWine_(req.id, req.wine); } },
   remove: { auth: true, write: true, run: function (req) { return removeWine_(req.id); } },
@@ -121,14 +122,17 @@ const ROUTES = {
 
 /* ============================== Setup (run from the editor) ============================== */
 
+// Add your passkey as NEW_PASSKEY under Project Settings → Script properties, then run this. It saves
+// only a salted hash, deletes NEW_PASSKEY, and logs every device out (they log in again).
 function setPassword() {
-  const passkey = 'type-your-passkey-here';
-  if (!passkey || passkey === 'type-your-passkey-here') {
-    throw new Error('Replace type-your-passkey-here with your passkey, then run setPassword again.');
-  }
+  const props = PropertiesService.getScriptProperties();
+  const passkey = props.getProperty('NEW_PASSKEY');
+  if (!passkey) throw new Error('Add NEW_PASSKEY (your passkey) under Project Settings → Script properties, then run setPassword() again.');
   const salt = Utilities.getUuid();
-  PropertiesService.getScriptProperties().setProperties({ PASS_SALT: salt, PASS_HASH: sha256_(salt + passkey) });
-  Logger.log('Saved as a salted SHA-256 hash. Now change the line back to type-your-passkey-here and save.');
+  props.setProperties({ PASS_SALT: salt, PASS_HASH: sha256_(salt + passkey) });
+  props.deleteProperty('NEW_PASSKEY');
+  props.deleteProperty('TOKEN_SECRET');  // old login tokens stop working
+  Logger.log('Saved as a salted hash, and NEW_PASSKEY was deleted. Log in again on each device.');
 }
 
 // Creates the tabs (Cellar, Consumed, Lists, Settings) on a new sheet; they start empty, and you add
@@ -232,8 +236,11 @@ function handle_(req) {
     req = req || {};
     const route = ROUTES[req.action];
     if (!route) throw new Error('Unknown action "' + req.action + '".');
-    const owner = req.key ? checkKey_(req.key, req.device) : false;
-    if (req.key && !owner) return fail({ auth: false, error: 'Wrong passkey.' });
+    // The page logs in once with the passkey and then sends the token `login` returned.
+    const owner = req.token ? checkToken_(req.token, req.device) : req.key ? checkKey_(req.key, req.device) : false;
+    if ((req.token || req.key) && !owner) {
+      return fail({ auth: false, error: req.token ? 'Your login has expired. Log in again.' : 'Wrong passkey.' });
+    }
     if (route.auth && !owner) return fail({ auth: false, error: 'Log in to make changes.' });
     const result = route.write ? withLock_(function () { return route.run(req); }) : route.run(req);
     const snap = snapshot_(owner);
@@ -243,7 +250,11 @@ function handle_(req) {
       cellar: snap.cellar, consumed: snap.consumed, lists: look.lists, settings: look.settings,
     };
   } catch (err) {
-    return fail({ error: String((err && err.message) || err) });
+    // Messages thrown here on purpose ("Price must be a number…") are plain Errors, written for
+    // you. Anything else (a bug, an Apps Script service failure) is logged, not shown.
+    if (err && err.name === 'Error') return fail({ error: String(err.message) });
+    Logger.log('Unexpected error: ' + ((err && (err.stack || err.message)) || err));
+    return fail({ error: 'Something went wrong. Try again.' });
   }
 }
 
@@ -579,7 +590,7 @@ function lookups_() {
 // lock out only that device. A higher limit across all devices is the backstop.
 function checkKey_(key, device) {
   const cache = CacheService.getScriptCache();
-  const dev = 'failedLogins:' + (/^[A-Za-z0-9_-]{8,64}$/.test(String(device || '')) ? device : 'unknown');
+  const dev = 'failedLogins:' + deviceId_(device);
   const fails = Number(cache.get(dev) || 0);
   const allFails = Number(cache.get('failedLogins:all') || 0);
   if (fails >= AUTH.maxFailedLogins || allFails >= AUTH.maxFailedLoginsAll) {
@@ -588,7 +599,7 @@ function checkKey_(key, device) {
   const props = PropertiesService.getScriptProperties();
   const salt = props.getProperty('PASS_SALT');
   const hash = props.getProperty('PASS_HASH');
-  if (!salt || !hash) throw new Error('No passkey set yet. Run setPassword() in the script editor.');
+  if (!salt || !hash) throw new Error('No passkey set yet. Add NEW_PASSKEY in Script properties and run setPassword().');
   const ok = sha256_(salt + String(key)) === hash;
   if (!ok) {
     cache.put(dev, String(fails + 1), AUTH.lockoutSeconds);
@@ -597,10 +608,42 @@ function checkKey_(key, device) {
   return ok;
 }
 
+function deviceId_(device) { return /^[A-Za-z0-9_-]{8,64}$/.test(String(device || '')) ? String(device) : 'unknown'; }
+
 function sha256_(text) {
-  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, text, Utilities.Charset.UTF_8)
-    .map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); })
-    .join('');
+  return hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, text, Utilities.Charset.UTF_8));
+}
+
+function hex_(bytes) {
+  return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('');
+}
+
+/* Login tokens: "device|expiry|signature". The signature (an HMAC with TOKEN_SECRET) proves this
+   device logged in with the passkey, so the page never keeps the passkey, and nothing is stored per
+   login. Checking a token never counts as a failed login, so a lockout from someone guessing
+   passkeys doesn't log out your devices. setPassword() replaces the secret, which ends every login. */
+const TOKEN_DAYS = 30;
+
+function tokenSecret_() {
+  const props = PropertiesService.getScriptProperties();
+  let secret = props.getProperty('TOKEN_SECRET');
+  if (!secret) {
+    secret = Utilities.getUuid() + Utilities.getUuid();
+    props.setProperties({ TOKEN_SECRET: secret });
+  }
+  return secret;
+}
+
+function signToken_(body) { return hex_(Utilities.computeHmacSha256Signature(body, tokenSecret_())); }
+
+function makeToken_(device) {
+  const body = deviceId_(device) + '|' + (Date.now() + TOKEN_DAYS * 86400000);
+  return body + '|' + signToken_(body);
+}
+
+function checkToken_(token, device) {
+  const p = String(token).split('|');
+  return p.length === 3 && p[0] === deviceId_(device) && Number(p[1]) > Date.now() && signToken_(p[0] + '|' + p[1]) === p[2];
 }
 
 /* ============================== Telegram bot (optional) ============================== */
@@ -613,20 +656,12 @@ function sha256_(text) {
 //   Polling (fallback, replies within a minute): a timer runs pollTelegram(). Set up with installTelegram().
 // Either way an hourly timer runs sendReminders(), which sends once a day at the reminderHour
 // set in the Settings tab (so changing the hour there needs no reinstall).
-// Your chat gets everything. Guests (addTelegramGuest) can only look things up, never see hidden
-// bottles and get no reminders. Every other chat is ignored. The token, chat ids and relay secret
-// live in Script Properties; status() lists everything stored there.
+// Your chat gets everything. Guests (who joined with TG_JOIN_PHRASE) can only look things up, never
+// see hidden bottles and get no reminders. Every other chat is ignored. The bot token
+// (TELEGRAM_TOKEN, added by you under Project Settings → Script properties), chat ids and relay
+// secret live in Script Properties; status() lists everything stored there.
 
 const BOT = { maxButtons: 30 };
-
-// Run once from the editor. Paste your token, run, then put the placeholder back.
-function setTelegram() {
-  const token = 'paste-your-bot-token-here';
-  if (token.indexOf('paste-') === 0) throw new Error('Paste your bot token into setTelegram(), then run it again.');
-  if (!/^\d+:[\w-]{30,}$/.test(token)) throw new Error('That doesn\'t look like a bot token. Copy it again from @BotFather.');
-  PropertiesService.getScriptProperties().setProperties({ TELEGRAM_TOKEN: token });
-  Logger.log('Saved. Send your bot a message in Telegram, then run findTelegramChatId(). Put the placeholder back afterwards.');
-}
 
 // Finds your chat from the last message you sent the bot, and saves it as the only chat it answers.
 function findTelegramChatId() {
@@ -694,20 +729,36 @@ function uninstallTelegram() {
   Logger.log('Commands and reminders are off.');
 }
 
-// Lets someone else use the bot to look things up. They send the bot any message first (it won't
-// answer them yet), then you run this. They can't change anything or see hidden bottles.
-function addTelegramGuest() {
-  const props = PropertiesService.getScriptProperties();
-  let who = null;
-  try { who = JSON.parse(props.getProperty('TG_LAST_STRANGER') || 'null'); } catch (err) { who = null; }
-  if (!who || !who.id) throw new Error('Nobody new has messaged the bot. Ask them to send it "hi", then run this again.');
-  const guests = telegramGuests_().filter(function (g) { return g.id !== who.id; });
-  guests.push(who);
-  props.setProperties({ TELEGRAM_GUESTS: JSON.stringify(guests) });
-  props.deleteProperty('TG_LAST_STRANGER');
+// Guests join by sending the bot the join phrase you gave them (TG_JOIN_PHRASE under Project
+// Settings → Script properties; change it to stop new joins). You get a message with a Remove
+// button. Wrong guesses are limited per chat, and with no phrase set nobody can join.
+const JOIN = { maxTries: 5, seconds: 3600 };
+
+function tryJoin_(msg, chatId) {
+  const phrase = PropertiesService.getScriptProperties().getProperty('TG_JOIN_PHRASE');
+  if (!phrase || !msg.text) return false;
+  const cache = CacheService.getScriptCache();
+  const tries = Number(cache.get('joinTries:' + chatId) || 0);
+  if (tries >= JOIN.maxTries) return false;
+  const norm = function (s) { return fold_(s).replace(/\s+/g, ' ').trim(); };
+  if (norm(msg.text) !== norm(phrase)) {
+    cache.put('joinTries:' + chatId, String(tries + 1), JOIN.seconds);
+    return false;
+  }
+  const c = msg.chat;
+  const who = { id: chatId, name: [c.first_name, c.last_name].filter(Boolean).join(' ') || c.title || c.username || 'someone' };
+  editGuests_(function (guests) { return guests.filter(function (g) { return String(g.id) !== chatId; }).concat([who]); });
   setBotCommands_();
-  telegramSend_('Welcome to the cellar 🍷 You can look things up here. Try /help.', null, who.id);
-  Logger.log('Added ' + who.name + ' (' + who.id + '). Guests now: ' + guests.map(function (g) { return g.name; }).join(', '));
+  telegramSend_('Welcome to the cellar 🍷 You can look things up here. Try /help.', null, chatId);
+  telegramSend_('👋 ' + escH_(who.name) + (c.username ? ' (@' + escH_(c.username) + ')' : '') + ' joined as a guest.',
+    [[{ text: 'Remove', callback_data: 'unguest:' + chatId }]]);
+  return true;
+}
+
+function editGuests_(change) {
+  withLock_(function () {
+    PropertiesService.getScriptProperties().setProperties({ TELEGRAM_GUESTS: JSON.stringify(change(telegramGuests_())) });
+  });
 }
 
 // Sends a one-off message to every guest. Type it below, run, then put the placeholder back.
@@ -720,7 +771,7 @@ function messageGuests() {
 
 function messageGuests_(text) {
   const guests = telegramGuests_();
-  if (!guests.length) throw new Error('There are no guests yet. Add one with addTelegramGuest().');
+  if (!guests.length) throw new Error('There are no guests yet. Give someone the join phrase (TG_JOIN_PHRASE).');
   const sent = [];
   guests.forEach(function (g) {
     try {
@@ -792,7 +843,8 @@ function status() {
 
   say('Time zone: ' + Session.getScriptTimeZone() + ' (today is ' + today_() + '). Reminders and "opened today" use this.');
 
-  const secret = ['PASS_SALT', 'PASS_HASH', 'TELEGRAM_TOKEN', 'TELEGRAM_RELAY_SECRET', 'ANTHROPIC_API_KEY'];
+  const secret = ['PASS_SALT', 'PASS_HASH', 'NEW_PASSKEY', 'TOKEN_SECRET', 'TELEGRAM_TOKEN', 'TELEGRAM_RELAY_SECRET',
+    'ANTHROPIC_API_KEY', 'TG_JOIN_PHRASE'];
   const props = PropertiesService.getScriptProperties().getProperties();
   say('Stored settings (Project Settings → Script properties):');
   Object.keys(props).sort().forEach(function (k) {
@@ -1079,13 +1131,7 @@ function handleTelegram_(update) {
   const chatId = String(msg.chat.id);
   const guest = chatId !== ownerId;
   if (guest && !telegramGuests_().some(function (g) { return String(g.id) === chatId; })) {
-    // Not answered, but remembered, so addTelegramGuest() can let them in.
-    if (update.message) {
-      const c = msg.chat;
-      const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || c.title || c.username || 'someone';
-      props.setProperties({ TG_LAST_STRANGER: JSON.stringify({ id: chatId, name: name }) });
-    }
-    return false;
+    return update.message ? tryJoin_(msg, chatId) : false;  // strangers get no answer unless they join
   }
   return answerTelegram_(update, msg, chatId, guest, props);
 }
@@ -1109,6 +1155,13 @@ function answerTelegram_(update, msg, chatId, guest, props) {
     // Acknowledge first: if this fails (e.g. a stale tap), the buttons must still be replaced below,
     // or a second tap could drink another bottle.
     try { telegramApi_('answerCallbackQuery', { callback_query_id: cb.id }); } catch (err) { Logger.log(String(err.message)); }
+    const un = /^unguest:(-?\d+)$/.exec(cb.data || '');
+    if (un) {
+      if (!guest) editGuests_(function (guests) { return guests.filter(function (g) { return String(g.id) !== un[1]; }); });
+      telegramApi_('editMessageText', { chat_id: chatId, message_id: msg.message_id,
+        text: guest ? 'Only the owner can remove guests.' : 'Removed. They can no longer use the bot.' });
+      return true;
+    }
     const lbl = /^lbl:(\w+):(\w+)$/.exec(cb.data || '');
     if (lbl && DRAFT_ACTIONS[lbl[1]]) {
       labelTap_(lbl[1], lbl[2], msg, chatId, guest);
@@ -1236,23 +1289,13 @@ function sortCellar_(recs) {
 // model, for labels Haiku gets wrong. You give the drinking window yourself by replying to the
 // draft with it ("2028-2040"). Changes ("vintage 2019, price 150") are parsed here too: only
 // reading the wine calls Claude. Cost: about US$0.0005 a label, about US$0.01 a Retry.
-// Set up with setLabelReader(). Drafts are kept in the TG_DRAFTS Script Property (newest 10).
+// Set up: add ANTHROPIC_API_KEY under Project Settings → Script properties. Drafts are kept in the TG_DRAFTS Script Property (newest 10).
 
 const LABEL = {
   reader: 'claude-haiku-5-5', retry: 'claude-sonnet-5-5',
   apiVersion: '2026-10-21', maxDrafts: 10,
 };
 const DRAFT_FIELDS = ['producer', 'wine', 'cuvee', 'vintage', 'colour', 'grape'];
-
-// Run once from the editor. Paste your key, run, then put the placeholder back.
-// (Or add ANTHROPIC_API_KEY yourself under Project Settings → Script properties.)
-function setLabelReader() {
-  const anthropicKey = 'paste-your-anthropic-key-here';
-  if (anthropicKey.indexOf('paste-') === 0) throw new Error('Paste your Anthropic API key into setLabelReader(), then run it again.');
-  if (!/^sk-ant-[\w-]{20,}$/.test(anthropicKey)) throw new Error('That doesn\'t look like an Anthropic API key. It starts with sk-ant-.');
-  PropertiesService.getScriptProperties().setProperties({ ANTHROPIC_API_KEY: anthropicKey });
-  Logger.log('Saved. Send your bot a photo of a label. Put the placeholder back afterwards.');
-}
 
 // The caption is a note, kept as it is (the price, if any, is added with ✏️ Fix or "price: 150").
 function labelFromPhoto_(msg, chatId) {
@@ -1273,7 +1316,7 @@ function splitPrice_(text) {
 // the drinking window.
 function startDraft_(d, chatId, status) {
   if (!PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY')) {
-    telegramSend_('⚠️ I can\'t look up wines yet. Run setLabelReader() in Apps Script first.', null, chatId);
+    telegramSend_('⚠️ I can\'t look up wines yet. Add ANTHROPIC_API_KEY under Project Settings → Script properties.', null, chatId);
     return;
   }
   Object.assign(d, { id: newId_().slice(0, 8), chatId: chatId, window: '' });
@@ -1524,7 +1567,7 @@ function wineField_(d) {
 function claude_(req) {
   const props = PropertiesService.getScriptProperties();
   const key = props.getProperty('ANTHROPIC_API_KEY');
-  if (!key) throw new Error('I can\'t look up wines yet. Run setLabelReader() in Apps Script first.');
+  if (!key) throw new Error('I can\'t look up wines yet. Add ANTHROPIC_API_KEY under Project Settings → Script properties.');
   // A daily cap on calls from the bot and the website together (Settings: aiDailyLimit).
   let used = {};
   try { used = JSON.parse(props.getProperty('AI_USES') || '{}'); } catch (err) { used = {}; }
@@ -1552,7 +1595,7 @@ function claude_(req) {
   if (code !== 200 || !out || !out.content) {
     const why = out && out.error && out.error.message ? out.error.message : 'HTTP ' + code;
     Logger.log('Claude error: ' + why);
-    if (code === 401) throw new Error('Claude didn\'t accept the API key. Run setLabelReader() again.');
+    if (code === 401) throw new Error('Claude didn\'t accept the API key. Check ANTHROPIC_API_KEY in Script properties.');
     if (/credit balance/i.test(why)) throw new Error('Your Anthropic credit has run out. Top up at console.anthropic.com.');
     throw new Error('Claude didn\'t answer (' + why + ').');
   }
@@ -1763,14 +1806,14 @@ function recentDraft_() {
 function telegramConfig_() {
   const p = PropertiesService.getScriptProperties();
   const cfg = { token: p.getProperty('TELEGRAM_TOKEN'), chatId: p.getProperty('TELEGRAM_CHAT_ID') };
-  if (!cfg.token) throw new Error('Run setTelegram() first.');
+  if (!cfg.token) throw new Error('Add TELEGRAM_TOKEN (from @BotFather) under Project Settings → Script properties.');
   if (!cfg.chatId) throw new Error('Send your bot a message in Telegram, then run findTelegramChatId().');
   return cfg;
 }
 
 function telegramApi_(method, payload) {
   const token = PropertiesService.getScriptProperties().getProperty('TELEGRAM_TOKEN');
-  if (!token) throw new Error('No Telegram bot token yet. Run setTelegram() first.');
+  if (!token) throw new Error('No Telegram bot token yet. Add TELEGRAM_TOKEN under Project Settings → Script properties.');
   const res = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/' + method, {
     method: 'post', contentType: 'application/json', payload: JSON.stringify(payload || {}), muteHttpExceptions: true,
   });

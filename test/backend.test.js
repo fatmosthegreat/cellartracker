@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { createFakeGas, loadBackend, sha256Bytes, SAMPLE_BOTTLES } = require('../dev/fake-gas.js');
+const { createFakeGas, loadBackend, sha256Bytes, hmacSha256Bytes, SAMPLE_BOTTLES } = require('../dev/fake-gas.js');
 
 const CODE = fs.readFileSync(path.join(__dirname, '../apps-script/Code.gs'), 'utf8');
 const PASSKEY = 'test-passkey';
@@ -317,19 +317,20 @@ test('the bot ignores other chats and never answers an update twice', () => {
   assert.equal(ok('list').cellar.length, 5);
 });
 
-test('guests: let in by addTelegramGuest, look-ups only, hidden bottles stay hidden', () => {
+test('guests: join with the phrase, look-ups only, hidden bottles stay hidden', () => {
   const { say, sent, ok, backend, gas } = freshBot();
   const GUEST = '777';
-  assert.throws(() => backend.addTelegramGuest(), /Nobody new/);
   const hiddenOne = ok('list').cellar.find(w => w.status === 'In cellar');
   ok('update', { id: hiddenOne.id, wine: { hidden: true } });
 
-  // A stranger is ignored but noted, then let in.
+  // A stranger is ignored, then joins with the phrase (any case or spacing).
+  gas.PropertiesService.getScriptProperties().setProperties({ TG_JOIN_PHRASE: 'Old Vines Please' });
   gas._fetches.length = 0;
-  const knock = { update_id: 900, message: { message_id: 1, chat: { id: Number(GUEST), first_name: 'Sam' }, text: 'hi' } };
-  assert.equal(backend.handleTelegram_(knock), false);
+  const knock = text => backend.handleTelegram_({ update_id: 900, message: { message_id: 1,
+    chat: { id: Number(GUEST), first_name: 'Sam', username: 'sam_w' }, text } });
+  assert.equal(knock('hi'), false);
   assert.equal(gas._fetches.length, 0, 'strangers get no answer');
-  backend.addTelegramGuest();
+  assert.equal(knock('  old   VINES please '), true);
   const welcome = gas._fetches.find(f => f.method === 'sendMessage');
   assert.equal(String(welcome.payload.chat_id), GUEST);
   const menus = gas._fetches.filter(f => f.method === 'setMyCommands');
@@ -974,8 +975,7 @@ test('AI look-ups stop at the daily limit from the Settings tab, for the bot and
 
 test('label photos: guests are refused, keys are needed, and an unreadable photo can be retried or cancelled', () => {
   const c = labelBot({ keys: false });
-  assert.match(c.sent(c.photo()), /Run setLabelReader\(\)/);
-  assert.throws(() => c.backend.setLabelReader(), /Paste your Anthropic API key/);
+  assert.match(c.sent(c.photo()), /Add ANTHROPIC_API_KEY/);
 
   const props = c.gas.PropertiesService.getScriptProperties();
   props.setProperties({ ANTHROPIC_API_KEY: 'sk-ant-test', TELEGRAM_GUESTS: JSON.stringify([{ id: '555', name: 'Sam' }]) });
@@ -1222,6 +1222,78 @@ test('wrong passkeys lock out only that device, with a backstop across all devic
   assert.equal(login(PASSKEY, 'owner-phone-0001').ok, true, 'the owner is not locked out');
   for (let d = 0; d < 40; d++) login('wrong', 'random-device-' + d);
   assert.match(login(PASSKEY, 'owner-phone-0001').error, /Too many/, 'many devices at once still trip the backstop');
+});
+
+test('login returns a token; the token works without the passkey and survives a lockout', () => {
+  const { backend, gas } = freshCellar();
+  const DEV = 'owner-phone-0001';
+  const login = backend.handle_({ action: 'login', key: PASSKEY, device: DEV });
+  const token = login.result.token;
+  assert.match(token, /^owner-phone-0001\|\d+\|[0-9a-f]{64}$/);
+  const add = req => backend.handle_(Object.assign({ action: 'create', wine: { producer: 'X', wine: 'Y' }, device: DEV }, req));
+  assert.equal(add({ token }).ok, true, 'the token alone can make changes');
+
+  // Tampered, wrong-device and expired tokens are refused, and say to log in again.
+  const [dev, exp, sig] = token.split('|');
+  assert.match(add({ token: `${dev}|${Number(exp) + 1}|${sig}` }).error, /login has expired/);
+  assert.equal(add({ token, device: 'someone-else-01' }).auth, false);
+  const secret = gas.PropertiesService.getScriptProperties().getProperty('TOKEN_SECRET');
+  const sign = body => Buffer.from(hmacSha256Bytes(body, secret)).toString('hex');
+  const old = `${dev}|${Date.now() - 1000}`;
+  assert.equal(add({ token: `${old}|${sign(old)}` }).auth, false, 'expired');
+
+  // Someone guessing passkeys from many devices locks out new logins, not your logged-in device.
+  for (let d = 0; d < 40; d++) backend.handle_({ action: 'login', key: 'wrong', device: 'random-device-' + d });
+  assert.match(backend.handle_({ action: 'login', key: PASSKEY, device: DEV }).error, /Too many/);
+  assert.equal(add({ token }).ok, true, 'still logged in');
+});
+
+test('setPassword reads NEW_PASSKEY, deletes it, and logs every device out', () => {
+  const { backend, gas } = freshCellar();
+  const props = gas.PropertiesService.getScriptProperties();
+  assert.throws(() => backend.setPassword(), /Add NEW_PASSKEY/);
+  const token = backend.handle_({ action: 'login', key: PASSKEY, device: 'owner-phone-0001' }).result.token;
+  props.setProperties({ NEW_PASSKEY: 'a-new-passkey' });
+  backend.setPassword();
+  assert.equal(props.getProperty('NEW_PASSKEY'), null, 'the plain passkey is not kept');
+  assert.equal(backend.handle_({ action: 'login', token, device: 'owner-phone-0001' }).auth, false, 'old tokens end');
+  assert.equal(backend.handle_({ action: 'login', key: 'a-new-passkey', device: 'owner-phone-0001' }).ok, true);
+});
+
+test('unexpected errors are logged, not shown; our own messages still are', () => {
+  const { backend, gas, owner } = freshCellar();
+  assert.match(owner('create', { wine: { producer: 'X', wine: 'Y', price: 'abc' } }).error, /Price must be a number/);
+  gas._spreadsheet.getSheetByName = () => { throw new TypeError("Cannot read properties of undefined (reading 'secret')"); };
+  const res = backend.handle_({ action: 'list' });
+  assert.equal(res.error, 'Something went wrong. Try again.');
+});
+
+test('the join phrase: wrong guesses are limited, no phrase means no joins, and Remove is owner-only', () => {
+  const { backend, gas, tap, sent } = freshBot();
+  const props = gas.PropertiesService.getScriptProperties();
+  const guests = () => JSON.parse(props.getProperty('TELEGRAM_GUESTS') || '[]').map(g => g.id);
+  let id = 3000;
+  const knock = (chat, text) => backend.handleTelegram_({ update_id: ++id, message: { message_id: 1, chat: { id: chat, first_name: 'Kim' }, text } });
+
+  assert.equal(knock(888, 'open sesame'), false, 'no phrase set: nobody joins');
+  props.setProperties({ TG_JOIN_PHRASE: 'open sesame' });
+  for (let i = 0; i < 5; i++) knock(888, 'guess ' + i);
+  assert.equal(knock(888, 'open sesame'), false, 'after 5 wrong guesses the chat is ignored');
+  assert.deepEqual(guests(), []);
+
+  gas._fetches.length = 0;
+  assert.equal(knock(999, 'Open Sesame'), true);
+  assert.deepEqual(guests(), ['999']);
+  const alert = gas._fetches.find(f => f.method === 'sendMessage' && String(f.payload.chat_id) === CHAT);
+  assert.match(alert.payload.text, /Kim joined as a guest/);
+  const remove = alert.payload.reply_markup.inline_keyboard[0][0].callback_data;
+
+  // A guest can't remove anyone; you can.
+  const forged = backend.handleTelegram_({ update_id: ++id, callback_query: { id: 'cb', data: remove, message: { message_id: 5, chat: { id: 999 } } } });
+  assert.equal(forged, true);
+  assert.deepEqual(guests(), ['999']);
+  assert.match(sent(tap(remove)), /Removed/);
+  assert.deepEqual(guests(), []);
 });
 
 test('status() checks the deployed build, hides secrets and lists timers', () => {

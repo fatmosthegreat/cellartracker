@@ -4,8 +4,9 @@ import { config } from "./config.js";
 
 export const isDemo = !config.apiUrl;
 
-// A random id for this browser, sent with the passkey. Wrong passkeys then lock out only the
-// device they came from, not the owner everywhere. Not secret, and not used for anything else.
+// A random id for this browser, sent with the passkey or login token. Wrong passkeys then lock out
+// only the device they came from, and a login token only works from the device it was made for.
+// Not secret.
 const DEVICE = (() => {
   const fresh = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, "0")).join("");
   try {
@@ -19,14 +20,14 @@ const DEVICE = (() => {
 
 /**
  * Calls a backend action. Throws an Error with a readable message on failure;
- * `error.auth` is true when the passkey was missing or wrong.
+ * `error.auth` is true when the passkey or login token was missing, wrong or expired.
  * @param {"list"|"login"|"create"|"update"|"remove"|"adjust"|"drink"|"identify"} action
  * @param {object} [payload]  e.g. { id, wine }, { id, drink } or { identify: { text, photo, strong } }
- * @param {string|null} [key] the passkey, if logged in
+ * @param {{token: string}|{key: string}|null} [auth] the login token, or the passkey once to log in
  */
-export async function call(action, payload = {}, key = null) {
+export async function call(action, payload = {}, auth = null) {
   const body = { action, ...payload };
-  if (key) Object.assign(body, { key, device: DEVICE });
+  if (auth) Object.assign(body, auth, { device: DEVICE });
   const data = isDemo ? await callDemo(body) : await callRemote(body);
   if (data.auth === false) {
     const err = new Error(data.error || "Wrong passkey.");

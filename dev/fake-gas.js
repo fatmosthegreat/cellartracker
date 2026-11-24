@@ -104,6 +104,7 @@ function createFakeGas() {
       }),
       // Apps Script returns signed bytes (-128..127); match that.
       computeDigest: (_alg, text) => sha256Bytes(text).map(b => (b > 127 ? b - 256 : b)),
+      computeHmacSha256Signature: (value, key) => hmacSha256Bytes(value, key).map(b => (b > 127 ? b - 256 : b)),
       base64Encode: bytes => {
         const s = bytes.map(b => String.fromCharCode(b & 255)).join('');
         return typeof btoa === 'function' ? btoa(s) : Buffer.from(s, 'binary').toString('base64');
@@ -207,16 +208,28 @@ function loadBackend(gas, codeSource) {
   const names = Object.keys(gas).filter(k => !k.startsWith('_'));
   const factory = new Function(...names,
     codeSource + '\n;return { handle_, doGet, doPost, setup, migrate, sha256_, SCHEMA,' +
-    ' handleTelegram_, addTelegramGuest, removeTelegramGuests, messageGuests, messageGuests_, sendReminders_, remindersDue_, installTelegram, uninstallTelegram, findTelegramChatId, pollTelegram,' +
-    ' setLabelReader, relaySecret, installTelegramRelay_, sendReminders, status, lookups_, checkKey_, BUILD,' +
+    ' handleTelegram_, removeTelegramGuests, messageGuests, messageGuests_, sendReminders_, remindersDue_, installTelegram, uninstallTelegram, findTelegramChatId, pollTelegram,' +
+    ' setPassword, relaySecret, installTelegramRelay_, sendReminders, status, lookups_, checkKey_, BUILD,' +
     ' dueDate_, table_, readRows_, writeRow_, encode_, withLock_, adjustBottles_ };');
   return factory(...names.map(n => gas[n]));
 }
 
 // Small synchronous SHA-256 (UTF-8 input, byte array output). The browser's crypto.subtle is
 // async, and Code.gs needs a synchronous digest, so the fake carries its own.
+// HMAC-SHA256 of two strings, as unsigned bytes (RFC 2104), built on sha256Bytes so it also runs in
+// the browser for demo mode.
+function hmacSha256Bytes(value, key) {
+  const utf8 = s => Array.from(new TextEncoder().encode(String(s)));
+  let k = utf8(key);
+  if (k.length > 64) k = sha256Bytes(k);
+  while (k.length < 64) k.push(0);
+  const inner = sha256Bytes(k.map(b => b ^ 0x36).concat(utf8(value)));
+  return sha256Bytes(k.map(b => b ^ 0x5c).concat(inner));
+}
+
+// SHA-256 of a string (as UTF-8) or of an array of bytes.
 function sha256Bytes(text) {
-  const bytes = Array.from(new TextEncoder().encode(String(text)));
+  const bytes = Array.isArray(text) ? text.slice() : Array.from(new TextEncoder().encode(String(text)));
   const K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
     0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
@@ -256,4 +269,4 @@ function sha256Bytes(text) {
   return out;
 }
 
-if (typeof module !== 'undefined') module.exports = { createFakeGas, loadBackend, sha256Bytes, SAMPLE_BOTTLES };
+if (typeof module !== 'undefined') module.exports = { createFakeGas, loadBackend, sha256Bytes, hmacSha256Bytes, SAMPLE_BOTTLES };
