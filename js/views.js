@@ -38,6 +38,9 @@ export function titleHTML(name = config.cellarName) {
   return `${esc(words.join(" "))} <em>${esc(last)}</em>`;
 }
 
+// A price the server didn't send (hidden from friends in ⚙️ Settings) shows as **.
+const noPrice = w => !("price" in w);
+
 export function statsHTML(state) {
   const { cellar, consumed } = state;
   const sum = list => list.reduce((n, w) => n + bottleCount(w), 0);
@@ -48,7 +51,7 @@ export function statsHTML(state) {
     `<span><b>${inCellar}</b> in the cellar</span>`,
     onOrder ? `<span><b>${onOrder}</b> on order</span>` : "",
     `<span><b>${consumed.length}</b> consumed</span>`,
-    `<span data-needs="price"><b>${esc(currencyOf(state))}${money(value)}</b> on the shelf</span>`,
+    `<span><b>${cellar.some(noPrice) ? "**" : esc(currencyOf(state)) + money(value)}</b> on the shelf</span>`,
   ].join("");
 }
 
@@ -171,7 +174,7 @@ export function historyHTML(consumed, now = new Date(), currency = "") {
     <div class="stats">
       <span><b>${consumed.length}</b> consumed</span>
       ${avg === null ? "" : `<span><b>${avg.toFixed(1)}</b> average rating</span>`}
-      <span data-needs="price"><b>${esc(currency)}${money(spent)}</b> spent</span>
+      <span><b>${consumed.some(noPrice) ? "**" : esc(currency) + money(spent)}</b> spent</span>
     </div>
     ${facts.length ? `<dl class="history-facts">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>` : ""}
   </div>`;
@@ -182,7 +185,7 @@ export function tastingHTML(w, currency = "", lists = FALLBACK_LISTS) {
   const facts = [
     ["Consumed", w.consumedOn ? formatDate(w.consumedOn) : ""],
     ["Bought", w.purchased ? formatDate(w.purchased) : ""],
-    ["Price", w.price !== null && w.price !== undefined && w.price !== "" ? `${currency}${money(w.price)}` : ""],
+    ["Price", noPrice(w) ? "**" : w.price !== null && w.price !== undefined && w.price !== "" ? `${currency}${money(w.price)}` : ""],
     ["Region", w.region],
     ["Grape", [w.grape, w.colour].filter(Boolean).join(" · ")],
   ].filter(f => f[1]);
@@ -241,7 +244,7 @@ function entryHTML(w, source, owner, lists) {
       <div class="line">
         ${title}
         <span class="dots" aria-hidden="true"></span>
-        <span class="price" data-needs="price">${w.price !== null && w.price !== undefined ? money(w.price) : "—"}</span>
+        <span class="price">${noPrice(w) ? "**" : w.price !== null && w.price !== undefined ? money(w.price) : "—"}</span>
       </div>
       ${meta.length ? `<div class="meta">${meta.join("")}</div>` : ""}
       ${w.notes ? `<p class="notes">${esc(w.notes)}</p>` : ""}

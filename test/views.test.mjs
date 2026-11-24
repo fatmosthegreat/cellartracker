@@ -9,7 +9,7 @@ const drunk = [
   { id: "a", producer: "Jadot", wine: "Gevrey", vintage: 2018, grape: "Pinot Noir", price: 140, consumedOn: "2026-11-02", rating: 8 },
   { id: "b", producer: "Jadot", wine: "Beaune", vintage: 2019, grape: "Pinot Noir", price: 60, consumedOn: "2026-03-10", rating: 9 },
   { id: "c", producer: "Penfolds", wine: "Bin 128", vintage: 2024, grape: "Shiraz", price: 88, consumedOn: "2025-12-24", rating: null },
-  { id: "d", producer: "Leflaive", wine: "Bourgogne", vintage: 2022, grape: "Chardonnay", consumedOn: "2024-05-01", rating: 9 },
+  { id: "d", producer: "Leflaive", wine: "Bourgogne", vintage: 2022, grape: "Chardonnay", price: null, consumedOn: "2024-05-01", rating: 9 },
 ];
 const text = html => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
@@ -151,10 +151,17 @@ test("settings card: one checkbox per option from the server, ticked when friend
   assert.match(html, /<input type="checkbox" name="storage" checked>\s*<span>Where it is &lt;b&gt;<\/span>/, "shown, so ticked; labels escaped");
 });
 
-test("what depends on a hideable field is marked, so the page can drop it when the server hid it", () => {
-  const state = { q: "", filter: "All", owner: false, consumed: drunk, cellar: [{ id: "k", producer: "Duroche", wine: "Vosne", status: "In cellar" }] };
-  assert.match(statsHTML(state), /<span data-needs="price">[^<]*<b>[^<]*<\/b> on the shelf/);
-  assert.match(historyHTML(drunk, NOW), /<span data-needs="price"><b>[^<]*<\/b> spent/);
-  assert.match(listHTML(state), /<span class="price" data-needs="price">/);
+test("a price the server hid shows as **, everywhere; an empty one still shows as before", () => {
+  const hidden = { id: "k", producer: "Duroche", wine: "Vosne", status: "In cellar" };
+  const strip = ({ price, ...w }) => w;
+  const state = { q: "", filter: "All", owner: false, consumed: drunk.map(strip), cellar: [hidden] };
+  assert.match(text(statsHTML(state)), /\*\* on the shelf/);
+  assert.match(text(historyHTML(state.consumed, NOW, "S$")), /\*\* spent/);
+  assert.match(listHTML(state), /<span class="price">\*\*<\/span>/);
+  assert.match(text(tastingHTML(hidden, "S$")), /Price \*\*/);
+
+  const empty = { ...hidden, price: null };
+  assert.match(listHTML({ ...state, cellar: [empty] }), /<span class="price">—<\/span>/);
+  assert.doesNotMatch(text(tastingHTML(empty, "S$")), /Price/);
   assert.match(tastingHTML({ producer: "P", wine: "W" }), /<p class="empty" data-needs="tastingNotes">No tasting notes/);
 });
