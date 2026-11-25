@@ -1706,3 +1706,21 @@ test('status() checks the deployed build, hides secrets and lists timers', () =>
   gas._replies.dev = () => ({ ok: true, build: 'whatever' });
   assert.match(backend.status().join('\n'), /Web app: couldn't check/, 'a /dev URL is the test version, not the deployment');
 });
+
+test('pins: at most 5 cellar bottles, on create or edit; re-saving or unpinning a pinned one still works', () => {
+  const { ok, owner } = freshCellar();
+  const ids = ok('list').cellar.map(w => w.id);
+  assert.equal(ids.length, 5);
+  ids.forEach(id => ok('update', { id, wine: { pinned: true } }));
+  assert.equal(ok('list').cellar.filter(w => w.pinned).length, 5);
+  ok('update', { id: ids[0], wine: { pinned: true, notes: 'still pinned' } });
+
+  const roumier = { producer: 'Roumier', wine: 'Chambolle-Musigny', vintage: 2019, pinned: true };
+  assert.match(String(owner('create', { wine: roumier }).error), /pinned 5 already\. Unpin one first/);
+  assert.ok(!ok('list').cellar.some(w => w.producer === 'Roumier'), 'nothing saved');
+
+  ok('update', { id: ids[1], wine: { pinned: false } });
+  const made = ok('create', { wine: roumier });
+  assert.equal(made.cellar.find(w => w.producer === 'Roumier').pinned, true);
+  assert.match(String(owner('update', { id: ids[1], wine: { pinned: true } }).error), /pinned 5 already/);
+});

@@ -111,6 +111,7 @@ h1 em { font-style: italic; color: var(--claret); }
 }
 .chip:hover { border-color: var(--ink); }
 .chip[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.tl-chips { margin: 0 0 14px; }
 .search {
   font: inherit; font-size: 16px; flex: 1 1 170px; max-width: 250px; min-width: 0;
   padding: 6px 14px; border: 1px solid var(--rule); border-radius: 999px; background: var(--surface); color: var(--ink);

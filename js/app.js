@@ -27,6 +27,7 @@ const state = {
   filter: "All",
   q: "",
   print: null,            // the Print card's choice, only while printing
+  graph: null,            // the graph chip picked (Pinned, Opening…); null = the first that has a bottle
 };
 // Show the last copy straight away; Apps Script takes a second or two to answer.
 const snapshot = isDemo ? null : saved.get(SNAPSHOT);
@@ -89,7 +90,7 @@ const findWine = id => {
 
 function render() {
   $("#stats").innerHTML = statsHTML(state);
-  $("#timeline").innerHTML = timelineHTML(state.cellar, new Date(), state.lists);
+  $("#timeline").innerHTML = timelineHTML(state.cellar, new Date(), state.lists, state.graph);
   $("#list").innerHTML = !state.loaded && !state.cellar.length
     ? `<p class="empty">Opening the cellar…</p>`
     : listHTML(state);
@@ -98,7 +99,7 @@ function render() {
   $("#settings-link").hidden = !state.owner;
   $("#owner-link").textContent = state.owner ? "Log out" : "Owner login";
   $("#owner-state").textContent = state.owner ? "Logged in. Bottles tagged Hidden are only visible to you." : "";
-  document.querySelectorAll(".chip").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.filter === state.filter)));
+  document.querySelectorAll(".chip[data-filter]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.filter === state.filter)));
   // Typing suggestions: the sheet's lists first, then anything already used on your bottles.
   const all = [...state.cellar, ...state.consumed];
   const options = (listed, field) => [...new Set([...listed, ...all.map(w => w[field]).filter(Boolean).sort()])]
@@ -523,7 +524,12 @@ document.querySelectorAll("dialog").forEach(d => {
   d.addEventListener("click", e => { if (fromBackdrop && e.target === d && mayClose(d)) d.close(); fromBackdrop = false; });
   d.addEventListener("cancel", e => { if (!mayClose(d)) e.preventDefault(); });
 });
-document.querySelectorAll(".chip").forEach(b => b.addEventListener("click", () => { state.filter = b.dataset.filter; render(); }));
+document.querySelectorAll(".chip[data-filter]").forEach(b => b.addEventListener("click", () => { state.filter = b.dataset.filter; render(); }));
+// The graph's chips are redrawn with it, so one listener on the graph handles them.
+$("#timeline").addEventListener("click", e => {
+  const chip = e.target.closest("[data-graph]");
+  if (chip) { state.graph = chip.dataset.graph; render(); }
+});
 $("#search").addEventListener("input", e => { state.q = e.target.value; render(); });
 $("#add").addEventListener("click", () => openEditor(null));
 

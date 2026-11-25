@@ -55,14 +55,31 @@ export function statsHTML(state) {
   ].join("");
 }
 
-/** "When to open": each cellar bottle's drinking window on a shared year axis, with a line for today.
- *  Bottles on order are left out: they can't be opened until they arrive. */
-export function timelineHTML(cellar, now = new Date(), lists = FALLBACK_LISTS) {
-  const rows = cellar
+// The graph's chips, in order. A chip shows only if it has a bottle, and shows at most GRAPH_MAX.
+// Windows are whole years, so "soon" means this year or next. `soonest` sorts by the window's end.
+const GRAPH_MAX = 5;
+const soonest = (a, b) => a.win.to - b.win.to;
+const GRAPH_CHIPS = [
+  { key: "pinned", label: "Pinned", has: r => !!r.w.pinned },
+  { key: "opening", label: "Opening", has: (r, year) => r.win.from === year + 1 },
+  { key: "closing", label: "Closing", has: (r, year) => r.win.to === year || r.win.to === year + 1, sort: soonest },
+  { key: "overdue", label: "Overdue", has: (r, year) => r.win.to < year, sort: soonest },
+];
+
+/** "When to open": cellar bottles' drinking windows on a shared year axis, with a line for today.
+ *  Bottles on order are left out: they can't be opened until they arrive. `chip` is the chip picked
+ *  (state.graph); it starts on the first chip that has a bottle. With no chip, the 5 soonest to close. */
+export function timelineHTML(cellar, now = new Date(), lists = FALLBACK_LISTS, chip = null) {
+  const year = now.getFullYear();
+  const all = cellar
     .filter(w => w.status !== "On order")
     .map(w => ({ w, win: parseWindow(w.window) }))
     .filter(r => r.win)
     .sort((a, b) => a.win.from - b.win.from || a.win.to - b.win.to);
+  const chips = GRAPH_CHIPS.filter(c => all.some(r => c.has(r, year)));
+  const picked = chips.find(c => c.key === chip) || chips[0];
+  const rows = (picked ? all.filter(r => picked.has(r, year)).sort(picked.sort || (() => 0)) : all.slice().sort(soonest))
+    .slice(0, GRAPH_MAX);
   if (!rows.length) return "";
 
   const today = now.getFullYear() + now.getMonth() / 12;
@@ -75,7 +92,6 @@ export function timelineHTML(cellar, now = new Date(), lists = FALLBACK_LISTS) {
   for (let y = Math.ceil(start / step) * step; y < end; y += step) ticks.push(y);
   const grid = ticks.map(y => `<i class="tl-grid" style="left:${x(y)}"></i>`).join("");
   const nowLine = `<i class="tl-now" style="left:${x(today)}"></i>`;
-  const year = now.getFullYear();
 
   const lines = rows.map(({ w, win }) => {
     const state = windowState(w.window, year);
@@ -94,7 +110,10 @@ export function timelineHTML(cellar, now = new Date(), lists = FALLBACK_LISTS) {
       ${ticks.map((y, i) => `<span class="tl-tick${i % 2 ? " alt" : ""}" style="left:${x(y)}">${y}</span>`).join("")}
       <span class="tl-now-label" style="left:${x(today)}">Now</span></span></div>`;
 
-  return `<h2 class="section-title">When to open</h2>
+  const chipBar = chips.length ? `<div class="chips tl-chips">${chips.map(c =>
+    `<button class="chip" type="button" data-graph="${c.key}" aria-pressed="${c === picked}">${c.label}</button>`).join("")}</div>` : "";
+
+  return `<h2 class="section-title">When to open</h2>${chipBar}
     <div class="tl" role="img" aria-label="Drinking windows for ${rows.length} bottles">${lines}${axis}</div>
     <p class="tl-key"><span><i class="key now"></i>Drink now</span><span><i class="key hold"></i>Not ready</span><span><i class="key late"></i>Past its window</span></p>`;
 }

@@ -188,3 +188,37 @@ test("print: the search filters, the card picks the sections, and drink now narr
   assert.doesNotMatch(html, /On order|Nothing/, "empty sections aren't printed");
   assert.match(html, /<span class="when">Drink /, "the window can be left out of the print");
 });
+
+test("graph chips: each shows only if it has a bottle, at most 5, starting on the first", () => {
+  const wine = (producer, window, more) => ({ id: producer, producer, wine: "W", status: "In cellar", window, ...more });
+  const cellar = [
+    wine("Pinned", "2020-2035", { pinned: true }),
+    wine("Opens", "2027-2035"), wine("Later", "2030-2040"),
+    wine("Closes27", "2025-2027"), wine("Closes26", "2024-2026"),
+    wine("Over22", "2015-2022"), wine("Over20", "2010-2020"),
+    wine("Ordered", "2027-2030", { status: "On order", pinned: true }),
+  ];
+  const shown = html => [...html.matchAll(/class="tl-label"><b[^>]*>[^<]*<\/b> ([^<]+)<\/span>/g)].map(m => m[1]);
+  const chips = html => [...html.matchAll(/data-graph="(\w+)" aria-pressed="(\w+)"/g)].map(m => m[1] + (m[2] === "true" ? "*" : ""));
+
+  const start = timelineHTML(cellar, NOW);
+  assert.deepEqual(chips(start), ["pinned*", "opening", "closing", "overdue"]);
+  assert.deepEqual(shown(start), ["Pinned"], "only what's pinned, and never a bottle on order");
+  assert.deepEqual(shown(timelineHTML(cellar, NOW, undefined, "opening")), ["Opens"], "opening next year only");
+  assert.deepEqual(shown(timelineHTML(cellar, NOW, undefined, "closing")), ["Closes26", "Closes27"], "soonest to close first");
+  assert.deepEqual(shown(timelineHTML(cellar, NOW, undefined, "overdue")), ["Over20", "Over22"], "longest overdue first");
+
+  // Nothing pinned: the first chip that has a bottle; a chip that's gone falls back the same way.
+  const unpinned = cellar.map(w => ({ ...w, pinned: false }));
+  assert.deepEqual(chips(timelineHTML(unpinned, NOW, undefined, "pinned")), ["opening*", "closing", "overdue"]);
+
+  // No chip has a bottle: no chips, the 5 soonest to close.
+  const far = ["2030-2045", "2028-2033", "2029-2050", "2026-2031", "2020-2036", "2024-2032"].map((w, i) => wine("W" + i, w));
+  const none = timelineHTML(far, NOW);
+  assert.deepEqual(chips(none), []);
+  assert.deepEqual(shown(none), ["W3", "W5", "W1", "W4", "W0"]);
+
+  // At most 5 in a chip.
+  const many = Array.from({ length: 7 }, (_, i) => wine("C" + i, "2020-2026"));
+  assert.equal(shown(timelineHTML(many, NOW)).length, 5);
+});

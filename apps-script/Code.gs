@@ -28,11 +28,11 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-24.16';
+const BUILD = '2026-11-25.1';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
-    'storage', 'price', 'purchased', 'notes', 'hidden', 'created', 'updated', 'collectBy', 'arrival', 'region', 'collectTime'],
+    'storage', 'price', 'purchased', 'notes', 'hidden', 'created', 'updated', 'collectBy', 'arrival', 'region', 'collectTime', 'pinned'],
   Consumed: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'price', 'purchased',
     'consumedOn', 'rating', 'notes', 'hidden', 'created', 'updated', 'region'],
 };
@@ -52,7 +52,10 @@ const FIELD_RULES = {
   status: { type: 'enum', values: ['In cellar', 'On order'], label: 'Status' },
   arrival: { type: 'enum', values: ['Collect', 'Delivery'], label: 'Collect or delivery' },
   hidden: { type: 'bool' },
+  pinned: { type: 'bool' },  // shown under Pinned on the website's graph; at most MAX_PINS (checkPins_)
 };
+
+const MAX_PINS = 5;
 
 const SYSTEM_FIELDS = ['id', 'created', 'updated'];
 
@@ -290,8 +293,15 @@ function handle_(req) {
 
 // Adds bottles. If the same wine + vintage is already in the cellar with the same status
 // (and no conflicting price), its bottle count goes up instead of adding a duplicate row.
+// At most MAX_PINS cellar bottles are pinned. `id` is the bottle being saved (null for a new one).
+function checkPins_(t, id) {
+  const pinned = readRows_(t).filter(function (r) { return r.rec.pinned && r.rec.id !== id; }).length;
+  if (pinned >= MAX_PINS) throw new Error('You\'ve pinned ' + MAX_PINS + ' already. Unpin one first.');
+}
+
 function createWine_(input) {
   const rec = clean_('Cellar', input, false);
+  if (rec.pinned) checkPins_(table_('Cellar'), null);
   rec.status = rec.status || 'In cellar';
   rec.bottles = rec.bottles || 1;
   const t = table_('Cellar');
@@ -319,6 +329,7 @@ function createWine_(input) {
 function updateWine_(id, input) {
   const found = findAnywhere_(id);
   const changes = clean_(found.tab.name, input, true);
+  if (changes.pinned && !found.rec.pinned) checkPins_(found.tab, found.rec.id);
   const next = Object.assign({}, found.rec, changes, { updated: timestamp_() });
   writeRow_(found.tab, found.row, encode_(found.tab, next, found.cells));
   return { id: found.rec.id };
