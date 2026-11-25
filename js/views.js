@@ -40,12 +40,12 @@ export function titleHTML(name = config.cellarName) {
 
 // A price the server didn't send (hidden from friends in ⚙️ Settings) shows as **.
 const noPrice = w => !("price" in w);
+const bottles = list => list.reduce((n, w) => n + bottleCount(w), 0);
 
 export function statsHTML(state) {
   const { cellar, consumed } = state;
-  const sum = list => list.reduce((n, w) => n + bottleCount(w), 0);
-  const inCellar = sum(cellar.filter(w => w.status === "In cellar"));
-  const onOrder = sum(cellar.filter(w => w.status === "On order"));
+  const inCellar = bottles(cellar.filter(w => w.status === "In cellar"));
+  const onOrder = bottles(cellar.filter(w => w.status === "On order"));
   const value = cellar.reduce((n, w) => n + (w.price || 0) * bottleCount(w), 0);
   return [
     `<span><b>${inCellar}</b> in the cellar</span>`,
@@ -144,8 +144,6 @@ export function visibilityHTML({ options, hidden }) {
     <span>${esc(o.label)}</span></label>`).join("");
 }
 
-const bottles = items => items.reduce((a, w) => a + bottleCount(w), 0);
-
 // The sections the list shows, each with its bottles that match the search. While printing,
 // state.print (from the Print card) picks the sections, and `now` narrows In the cellar to the
 // bottles to drink now (the graph's rule).
@@ -155,7 +153,8 @@ function listed(state) {
   const notes = /^notes(\s|$)/i.exec(q);
   const matches = notes ? w => !!w.notes && matchesSearch(w, q.slice(5), ["notes"]) : w => matchesSearch(w, q);
   const { print } = state;
-  const ready = w => !print || !print.now || w.status !== "In cellar" || (windowState(w.window) || {}).key === "now";
+  const drinkNow = w => (windowState(w.window) || {}).key === "now";
+  const ready = w => !(print && print.now && w.status === "In cellar") || drinkNow(w);
   return SECTIONS
     .filter(s => notes ? s.status === "Consumed" : state.filter === "All" || state.filter === s.status)
     .filter(s => !print || print.sections.includes(s.status))
