@@ -125,18 +125,37 @@ export function visibilityHTML({ options, hidden }) {
     <span>${esc(o.label)}</span></label>`).join("");
 }
 
+const bottles = items => items.reduce((a, w) => a + bottleCount(w), 0);
+
+// The sections the list shows, each with its bottles that match the search. While printing,
+// state.print (from the Print card) picks the sections, and `now` narrows In the cellar to the
+// bottles to drink now (the graph's rule).
+function listed(state) {
+  const lists = listsOf(state);
+  const q = state.q.trim();
+  const notes = /^notes(\s|$)/i.exec(q);
+  const matches = notes ? w => !!w.notes && matchesSearch(w, q.slice(5), ["notes"]) : w => matchesSearch(w, q);
+  const { print } = state;
+  const ready = w => !print || !print.now || w.status !== "In cellar" || (windowState(w.window) || {}).key === "now";
+  return SECTIONS
+    .filter(s => notes ? s.status === "Consumed" : state.filter === "All" || state.filter === s.status)
+    .filter(s => !print || print.sections.includes(s.status))
+    .map(s => ({ s, items: state[s.source].filter(w => (s.source === "consumed" || w.status === s.status) && matches(w) && ready(w)).sort(sortFor(s.status, lists)) }));
+}
+
+/** How many bottles the list shows: the Print card's count. */
+export function listedBottles(state) {
+  return listed(state).reduce((n, { items }) => n + bottles(items), 0);
+}
+
 export function listHTML(state) {
   const lists = listsOf(state);
   const currency = currencyOf(state);
   const q = state.q.trim();
-  const notes = /^notes(\s|$)/i.exec(q);
-  const matches = notes ? w => !!w.notes && matchesSearch(w, q.slice(5), ["notes"]) : w => matchesSearch(w, q);
-  const sections = SECTIONS.filter(s => notes ? s.status === "Consumed" : state.filter === "All" || state.filter === s.status);
   let html = "";
-  for (const s of sections) {
-    const items = state[s.source].filter(w => (s.source === "consumed" || w.status === s.status) && matches(w)).sort(sortFor(s.status, lists));
-    if (state.filter === "All" && !items.length && (q || s.status !== "In cellar")) continue;
-    const n = items.reduce((a, w) => a + bottleCount(w), 0);
+  for (const { s, items } of listed(state)) {
+    if (state.filter === "All" && !items.length && (q || state.print || s.status !== "In cellar")) continue;
+    const n = bottles(items);
     html += `<section class="group"><h2 class="section-title">${s.title}<span class="count">${n} bottle${n === 1 ? "" : "s"}</span></h2>`;
     if (s.status === "Consumed" && !q) html += historyHTML(state.consumed, new Date(), currency);
     html += items.length
@@ -208,7 +227,7 @@ function entryHTML(w, source, owner, lists) {
   } else {
     // A bottle on order shows no drinking window until it arrives (it's still saved, and shows then).
     if (w.status !== "On order") {
-      if (w.window) meta.push(`<span>Drink ${esc(w.window)}</span>`);
+      if (w.window) meta.push(`<span class="when">Drink ${esc(w.window)}</span>`);
       const ws = windowState(w.window);
       if (ws) meta.push(`<span class="pill ${ws.key}">${ws.label}</span>`);
     }

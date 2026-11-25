@@ -199,6 +199,25 @@
   </form>
 </dialog>
 
+<!-- Print: the current search is the filter; this card picks the sections and what each line shows. -->
+<dialog id="printer" aria-labelledby="pr-title">
+  <form class="dlg" id="pr-form" novalidate>
+    <h3 id="pr-title">Print the list</h3>
+    <p class="sub" id="pr-what"></p>
+    <div class="options">
+      <label class="check"><input type="checkbox" name="In cellar"><span>In the cellar</span></label>
+      <label class="check"><input type="checkbox" name="On order"><span>On order</span></label>
+      <label class="check"><input type="checkbox" name="Consumed"><span>Consumed</span></label>
+      <label class="check"><input type="checkbox" name="now"><span>Only ones to drink now <small>Narrows In the cellar</small></span></label>
+      <label class="check" id="pr-price"><input type="checkbox" name="price"><span>Show prices</span></label>
+      <label class="check"><input type="checkbox" name="window"><span>Show drinking windows</span></label>
+    </div>
+    <div class="dlg-foot"><span id="pr-count"></span><span class="spacer"></span>
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="submit" class="btn primary" id="pr-go">Print</button></div>
+  </form>
+</dialog>
+
 <dialog id="login" aria-labelledby="lg-title">
   <form class="dlg" id="lg-form" novalidate>
     <h3 id="lg-title">Owner login</h3>

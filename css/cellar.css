@@ -319,4 +319,6 @@ details[open] summary { margin-bottom: 12px; }
   .entry, .entry.consumed { break-inside: avoid; padding: 9px 0; margin: 0; background: none; }
   .vin { font-size: 18pt; }
   .entry.consumed .notes { -webkit-line-clamp: unset; line-clamp: unset; display: block; }
+  /* What the Print card left out (body[data-omit], set by js/app.js while printing). */
+  [data-omit~="price"] .price, [data-omit~="price"] [data-needs~="price"], [data-omit~="window"] .when { display: none; }
 }

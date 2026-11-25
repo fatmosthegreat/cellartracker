@@ -2,7 +2,7 @@
 // Run with: node --test   (needs Node 22+, which loads these ES modules without a build step)
 import test from "node:test";
 import assert from "node:assert/strict";
-import { historyHTML, tastingHTML, listHTML, timelineHTML, toneOf, visibilityHTML, statsHTML, FALLBACK_LISTS } from "../js/views.js";
+import { historyHTML, tastingHTML, listHTML, listedBottles, timelineHTML, toneOf, visibilityHTML, statsHTML, FALLBACK_LISTS } from "../js/views.js";
 
 const NOW = new Date(2026, 10, 23);  // 23 Nov 2026
 const drunk = [
@@ -164,4 +164,27 @@ test("a price the server hid shows as **, everywhere; an empty one still shows a
   assert.match(listHTML({ ...state, cellar: [empty] }), /<span class="price">—<\/span>/);
   assert.doesNotMatch(text(tastingHTML(empty, "S$")), /Price/);
   assert.match(tastingHTML({ producer: "P", wine: "W" }), /<p class="empty" data-needs="tastingNotes">No tasting notes/);
+});
+
+test("print: the search filters, the card picks the sections, and drink now narrows In the cellar", () => {
+  const year = new Date().getFullYear();
+  const cellar = [
+    { id: "r", producer: "Roumier", wine: "Chambolle", grape: "Pinot Noir", status: "In cellar", window: `${year - 2}-${year + 5}`, bottles: 2 },
+    { id: "h", producer: "Raveneau", wine: "Chablis", grape: "Chardonnay", status: "In cellar", window: `${year + 3}-${year + 10}` },
+    { id: "o", producer: "Dauvissat", wine: "Chablis", grape: "Chardonnay", status: "On order" },
+  ];
+  const state = { q: "", filter: "All", owner: false, cellar, consumed: drunk };
+  const print = (sections, more = {}) => ({ ...state, ...more, print: { sections, now: false, ...more.print } });
+
+  assert.equal(listedBottles(print(["In cellar"])), 3, "bottles, not wines");
+  assert.equal(listedBottles(print(["In cellar"], { print: { now: true } })), 2, "only the one to drink now");
+  assert.equal(listedBottles(print(["In cellar", "On order"], { q: "chardonnay" })), 2);
+  assert.equal(listedBottles(print(["Consumed"], { q: "jadot" })), 2);
+  assert.equal(listedBottles(print(["Consumed"], { print: { now: true } })), 4, "drink now leaves Consumed alone");
+  assert.equal(listedBottles(print([])), 0);
+
+  const html = listHTML(print(["In cellar", "On order"], { q: "roumier" }));
+  assert.match(html, /In the cellar/);
+  assert.doesNotMatch(html, /On order|Nothing/, "empty sections aren't printed");
+  assert.match(html, /<span class="when">Drink /, "the window can be left out of the print");
 });

@@ -19,7 +19,7 @@ It's set out like a restaurant wine list: what's in the cellar, what's on its wa
 - **Drinking history:** how many bottles, average rating, money spent, the best bottle, and favourite producers and grapes.
 
 **Anywhere**
-- **Print the list:** a clean, menu-style printout of the cellar.
+- **Print the list:** a clean, menu-style printout, or a PDF from the print dialog. Search first to print only some wines (say "chardonnay" or "vosne romanee"), then pick the sections (in the cellar, on order, consumed), only the ones to drink now, and whether prices and drinking windows show.
 - **Home-screen app:** on a phone, **Add to Home Screen** opens it full-screen with its own icon.
 - **Light and dark mode**, following your device.
 

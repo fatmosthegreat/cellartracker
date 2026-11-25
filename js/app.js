@@ -3,7 +3,7 @@
 import { config } from "./config.js";
 import { call, isDemo } from "./api.js";
 import { todayISO, bottleCount, esc } from "./format.js";
-import { titleHTML, statsHTML, timelineHTML, listHTML, tastingHTML, visibilityHTML, FALLBACK_LISTS } from "./views.js";
+import { titleHTML, statsHTML, timelineHTML, listHTML, listedBottles, tastingHTML, visibilityHTML, SECTIONS, FALLBACK_LISTS } from "./views.js";
 
 const $ = (sel, el = document) => el.querySelector(sel);
 
@@ -26,6 +26,7 @@ const state = {
   loaded: false,
   filter: "All",
   q: "",
+  print: null,            // the Print card's choice, only while printing
 };
 // Show the last copy straight away; Apps Script takes a second or two to answer.
 const snapshot = isDemo ? null : saved.get(SNAPSHOT);
@@ -414,13 +415,51 @@ $("#ts-edit").addEventListener("click", () => {
 
 /* ---------- Print ---------- */
 
-// Prints the bottles in the cellar as a clean list (css/cellar.css has the print styles),
-// then puts the filter and search back as they were.
+// The Print card: the current search is the filter; the card picks the sections (In the cellar to
+// start), "drink now", and whether prices and windows show. css/cellar.css has the print styles.
+const priceShown = hidden => !(hidden || []).includes("price");
+
+function printChoice() {
+  const f = readFields($("#pr-form"));
+  return { sections: SECTIONS.map(s => s.status).filter(status => f[status]), now: f.now, price: f.price, window: f.window };
+}
+
+function showPrintCount() {
+  const choice = printChoice();
+  $("#pr-form").elements.now.disabled = !choice.sections.includes("In cellar");
+  const n = listedBottles({ ...state, filter: "All", print: choice });
+  $("#pr-count").textContent = `${n} bottle${n === 1 ? "" : "s"}`;
+  $("#pr-go").disabled = !n;
+}
+
 $("#print-link").addEventListener("click", () => {
-  const before = { filter: state.filter, q: state.q };
-  Object.assign(state, { filter: "In cellar", q: "" });
+  const q = state.q.trim();
+  $("#pr-what").textContent = q ? `Matching “${q}”` : "Everything (search first to print only some wines).";
+  // A price the server hid can't be printed; the owner's starts from their ⚙️ Settings choice.
+  $("#pr-price").hidden = !priceShown(state.settings.hidden);
+  const mine = state.settings.visibility;
+  const start = { "In cellar": true, window: true, price: priceShown(mine ? mine.hidden : state.settings.hidden) };
+  for (const el of $("#pr-form").elements) if (el.type === "checkbox") el.checked = !!start[el.name];
+  showPrintCount();
+  $("#printer").showModal();
+});
+
+$("#pr-form").addEventListener("change", showPrintCount);
+
+// Prints the chosen list, then puts the page back as it was.
+$("#pr-form").addEventListener("submit", e => {
+  e.preventDefault();
+  const choice = printChoice();
+  $("#printer").close();
+  const filter = state.filter;
+  Object.assign(state, { filter: "All", print: choice });
+  document.body.dataset.omit = ["price", "window"].filter(k => !choice[k]).join(" ");
   render();
-  window.addEventListener("afterprint", () => { Object.assign(state, before); render(); }, { once: true });
+  window.addEventListener("afterprint", () => {
+    Object.assign(state, { filter, print: null });
+    delete document.body.dataset.omit;
+    render();
+  }, { once: true });
   window.print();
 });
 
