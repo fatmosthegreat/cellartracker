@@ -55,32 +55,34 @@ export function statsHTML(state) {
   ].join("");
 }
 
-// The graph's chips, in order. A chip shows only if it has a bottle, and shows at most GRAPH_MAX.
+// The graph's chips, in order: each picks its bottles from those with a window, and shows at most
+// GRAPH_MAX. A chip shows only if it picked a bottle. All is every bottle, pinned ones first;
+// "Show N more" under it shows the ones after the 5th.
 // Windows are whole years, so "soon" means this year or next. `soonest` sorts by the window's end.
 const GRAPH_MAX = 5;
 const soonest = (a, b) => a.win.to - b.win.to;
 const GRAPH_CHIPS = [
-  { key: "pinned", label: "Pinned", has: r => !!r.w.pinned },
-  { key: "opening", label: "Opening", has: (r, year) => r.win.from === year + 1 },
-  { key: "closing", label: "Closing", has: (r, year) => r.win.to === year || r.win.to === year + 1, sort: soonest },
-  { key: "overdue", label: "Overdue", has: (r, year) => r.win.to < year, sort: soonest },
+  { key: "all", label: "All", pick: rows => rows.filter(r => r.w.pinned).concat(rows.filter(r => !r.w.pinned)) },
+  { key: "opening", label: "Opening", pick: (rows, year) => rows.filter(r => r.win.from === year + 1) },
+  { key: "closing", label: "Closing", pick: (rows, year) => rows.filter(r => r.win.to === year || r.win.to === year + 1).sort(soonest) },
+  { key: "overdue", label: "Overdue", pick: (rows, year) => rows.filter(r => r.win.to < year).sort(soonest) },
 ];
 
 /** "When to open": cellar bottles' drinking windows on a shared year axis, with a line for today.
  *  Bottles on order are left out: they can't be opened until they arrive. `chip` is the chip picked
- *  (state.graph); it starts on the first chip that has a bottle. With no chip, the 5 soonest to close. */
-export function timelineHTML(cellar, now = new Date(), lists = FALLBACK_LISTS, chip = null) {
+ *  (state.graph; it starts on All), and `everything` is "Show N more" opened under All. */
+export function timelineHTML(cellar, now = new Date(), lists = FALLBACK_LISTS, chip = null, everything = false) {
   const year = now.getFullYear();
   const all = cellar
     .filter(w => w.status !== "On order")
     .map(w => ({ w, win: parseWindow(w.window) }))
     .filter(r => r.win)
     .sort((a, b) => a.win.from - b.win.from || a.win.to - b.win.to);
-  const chips = GRAPH_CHIPS.filter(c => all.some(r => c.has(r, year)));
+  if (!all.length) return "";
+  const chips = GRAPH_CHIPS.map(c => ({ ...c, rows: c.pick(all, year) })).filter(c => c.rows.length);
   const picked = chips.find(c => c.key === chip) || chips[0];
-  const rows = (picked ? all.filter(r => picked.has(r, year)).sort(picked.sort || (() => 0)) : all.slice().sort(soonest))
-    .slice(0, GRAPH_MAX);
-  if (!rows.length) return "";
+  const open = picked.key === "all" && everything;
+  const rows = open ? picked.rows : picked.rows.slice(0, GRAPH_MAX);
 
   const today = now.getFullYear() + now.getMonth() / 12;
   const start = Math.min(Math.floor(today), ...rows.map(r => r.win.from));
@@ -110,11 +112,13 @@ export function timelineHTML(cellar, now = new Date(), lists = FALLBACK_LISTS, c
       ${ticks.map((y, i) => `<span class="tl-tick${i % 2 ? " alt" : ""}" style="left:${x(y)}">${y}</span>`).join("")}
       <span class="tl-now-label" style="left:${x(today)}">Now</span></span></div>`;
 
-  const chipBar = chips.length ? `<div class="chips tl-chips">${chips.map(c =>
-    `<button class="chip" type="button" data-graph="${c.key}" aria-pressed="${c === picked}">${c.label}</button>`).join("")}</div>` : "";
+  const chipBar = `<div class="chips tl-chips">${chips.map(c =>
+    `<button class="chip" type="button" data-graph="${c.key}" aria-pressed="${c === picked}">${c.label}</button>`).join("")}</div>`;
+  const more = picked.key === "all" && all.length > GRAPH_MAX
+    ? `<button class="linkbtn tl-more" type="button" data-graph-more>${open ? "Show less" : `Show ${all.length - GRAPH_MAX} more`}</button>` : "";
 
   return `<h2 class="section-title">When to open</h2>${chipBar}
-    <div class="tl" role="img" aria-label="Drinking windows for ${rows.length} bottles">${lines}${axis}</div>
+    <div class="tl" role="img" aria-label="Drinking windows for ${rows.length} bottles">${lines}${axis}</div>${more}
     <p class="tl-key"><span><i class="key now"></i>Drink now</span><span><i class="key hold"></i>Not ready</span><span><i class="key late"></i>Past its window</span></p>`;
 }
 

@@ -189,7 +189,7 @@ test("print: the search filters, the card picks the sections, and drink now narr
   assert.match(html, /<span class="when">Drink /, "the window can be left out of the print");
 });
 
-test("graph chips: each shows only if it has a bottle, at most 5, starting on the first", () => {
+test("graph chips: All first (pinned on top, Show N more past 5); the others only if they have a bottle, at most 5", () => {
   const wine = (producer, window, more) => ({ id: producer, producer, wine: "W", status: "In cellar", window, ...more });
   const cellar = [
     wine("Pinned", "2020-2035", { pinned: true }),
@@ -201,24 +201,30 @@ test("graph chips: each shows only if it has a bottle, at most 5, starting on th
   const shown = html => [...html.matchAll(/class="tl-label"><b[^>]*>[^<]*<\/b> ([^<]+)<\/span>/g)].map(m => m[1]);
   const chips = html => [...html.matchAll(/data-graph="(\w+)" aria-pressed="(\w+)"/g)].map(m => m[1] + (m[2] === "true" ? "*" : ""));
 
+  const more = html => (/data-graph-more>([^<]+)</.exec(html) || [])[1];
+
   const start = timelineHTML(cellar, NOW);
-  assert.deepEqual(chips(start), ["pinned*", "opening", "closing", "overdue"]);
-  assert.deepEqual(shown(start), ["Pinned"], "only what's pinned, and never a bottle on order");
-  assert.deepEqual(shown(timelineHTML(cellar, NOW, undefined, "opening")), ["Opens"], "opening next year only");
+  assert.deepEqual(chips(start), ["all*", "opening", "closing", "overdue"]);
+  assert.deepEqual(shown(start), ["Pinned", "Over20", "Over22", "Closes26", "Closes27"],
+    "pinned on top, then the rest in the graph's order, 5 at most, never a bottle on order");
+  assert.equal(more(start), "Show 2 more");
+  const everything = timelineHTML(cellar, NOW, undefined, "all", true);
+  assert.deepEqual(shown(everything).slice(0, 1), ["Pinned"], "still on top when opened");
+  assert.equal(shown(everything).length, 7, "every bottle with a window");
+  assert.equal(more(everything), "Show less");
+  assert.deepEqual(shown(timelineHTML(cellar, NOW, undefined, "opening", true)), ["Opens"], "Show all is only for All");
+  assert.equal(more(timelineHTML(cellar, NOW, undefined, "opening")), undefined);
   assert.deepEqual(shown(timelineHTML(cellar, NOW, undefined, "closing")), ["Closes26", "Closes27"], "soonest to close first");
   assert.deepEqual(shown(timelineHTML(cellar, NOW, undefined, "overdue")), ["Over20", "Over22"], "longest overdue first");
 
-  // Nothing pinned: the first chip that has a bottle; a chip that's gone falls back the same way.
-  const unpinned = cellar.map(w => ({ ...w, pinned: false }));
-  assert.deepEqual(chips(timelineHTML(unpinned, NOW, undefined, "pinned")), ["opening*", "closing", "overdue"]);
-
-  // No chip has a bottle: no chips, the 5 soonest to close.
+  // Nothing pinned: All is the graph's order. A chip that's gone falls back to All.
   const far = ["2030-2045", "2028-2033", "2029-2050", "2026-2031", "2020-2036", "2024-2032"].map((w, i) => wine("W" + i, w));
-  const none = timelineHTML(far, NOW);
-  assert.deepEqual(chips(none), []);
-  assert.deepEqual(shown(none), ["W3", "W5", "W1", "W4", "W0"]);
+  const none = timelineHTML(far, NOW, undefined, "overdue");
+  assert.deepEqual(chips(none), ["all*"]);
+  assert.deepEqual(shown(none), ["W4", "W5", "W3", "W1", "W2"]);
 
-  // At most 5 in a chip.
+  // At most 5 in a chip; no Show more with 5 or fewer.
   const many = Array.from({ length: 7 }, (_, i) => wine("C" + i, "2020-2026"));
-  assert.equal(shown(timelineHTML(many, NOW)).length, 5);
+  assert.equal(shown(timelineHTML(many, NOW, undefined, "closing")).length, 5);
+  assert.equal(more(timelineHTML(far.slice(0, 5), NOW)), undefined);
 });

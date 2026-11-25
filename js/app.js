@@ -27,7 +27,8 @@ const state = {
   filter: "All",
   q: "",
   print: null,            // the Print card's choice, only while printing
-  graph: null,            // the graph chip picked (Pinned, Opening…); null = the first that has a bottle
+  graph: null,            // the graph chip picked (All, Opening…); null = All
+  graphAll: false,        // "Show all" opened under All
 };
 // Show the last copy straight away; Apps Script takes a second or two to answer.
 const snapshot = isDemo ? null : saved.get(SNAPSHOT);
@@ -90,7 +91,7 @@ const findWine = id => {
 
 function render() {
   $("#stats").innerHTML = statsHTML(state);
-  $("#timeline").innerHTML = timelineHTML(state.cellar, new Date(), state.lists, state.graph);
+  $("#timeline").innerHTML = timelineHTML(state.cellar, new Date(), state.lists, state.graph, state.graphAll);
   $("#list").innerHTML = !state.loaded && !state.cellar.length
     ? `<p class="empty">Opening the cellar…</p>`
     : listHTML(state);
@@ -528,7 +529,10 @@ document.querySelectorAll(".chip[data-filter]").forEach(b => b.addEventListener(
 // The graph's chips are redrawn with it, so one listener on the graph handles them.
 $("#timeline").addEventListener("click", e => {
   const chip = e.target.closest("[data-graph]");
-  if (chip) { state.graph = chip.dataset.graph; render(); }
+  if (chip) state.graph = chip.dataset.graph;
+  else if (e.target.closest("[data-graph-more]")) state.graphAll = !state.graphAll;
+  else return;
+  render();
 });
 $("#search").addEventListener("input", e => { state.q = e.target.value; render(); });
 $("#add").addEventListener("click", () => openEditor(null));
