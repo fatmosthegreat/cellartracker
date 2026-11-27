@@ -28,7 +28,7 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-25.1';
+const BUILD = '2026-11-27.1';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
@@ -406,21 +406,23 @@ function drinkWine_(id, input) {
 
 // Friends get no hidden bottles, and none of the fields the owner hides (nor OWNER_ONLY_FIELDS).
 // This is what keeps hidden data off the page and out of the /exec URL.
-function snapshot_(owner) {
+function visibleRecs_(tab, owner) {
   const hidden = hiddenFrom_(owner);
-  const recs = function (name) {
-    const drop = owner ? [] : OWNER_ONLY_FIELDS.concat(hiddenFields_(name, hidden));
-    return readRows_(table_(name)).map(function (r) { return r.rec; })
-      .filter(function (rec) { return owner || !rec.hidden; })
-      .map(function (rec) { return without_(rec, drop); });
-  };
-  return { cellar: recs('Cellar'), consumed: recs('Consumed') };
+  const drop = owner ? [] : OWNER_ONLY_FIELDS.concat(hiddenFields_(tab, hidden));
+  return readRows_(table_(tab)).map(function (r) { return r.rec; })
+    .filter(function (rec) { return owner || !rec.hidden; })
+    .map(function (rec) { return without_(rec, drop); });
+}
+
+function snapshot_(owner) {
+  return { cellar: visibleRecs_('Cellar', owner), consumed: visibleRecs_('Consumed', owner) };
 }
 
 /* ---------- What friends can see ---------- */
 
 // The visibility names hidden from this viewer: none for the owner.
 function hiddenFrom_(owner) { return owner ? [] : lookups_().settings.visibility; }
+function isHidden_(name, owner) { return hiddenFrom_(owner).indexOf(name) >= 0; }
 
 // The columns of `tab` that the hidden options strip.
 function hiddenFields_(tab, hidden) {
@@ -1218,29 +1220,41 @@ const TG_COMMANDS = {
     if (!q) return { text: 'Type what to look for, e.g. /search romanee' };
     return { text: listText_('Matches for “' + escH_(q) + '”', searchRecs_(recs, q), 'Nothing in the cellar matches “' + escH_(q) + '”.') };
   } },
-  stats: { menu: true, help: 'Bottle counts and value', run: function (q, recs, guest) {
+  stats: { menu: true, help: 'Collection, value, consumption & rating stats', run: function (q, recs, guest) {
+    const m = /^(\S+)(?:\s+([\s\S]*))?$/.exec(q);
+    const sub = m ? m[1].toLowerCase() : '';
+    const search = m && m[2] ? m[2].trim() : '';
+    if (sub) {
+      const view = STATS_VIEWS[sub];
+      if (!view) return { text: 'Unknown stat “' + escH_(sub) + '”. Try /stats value, collection, consumption or ratings.' };
+      return { text: view(search, recs, guest) };
+    }
     const sum = function (status) {
       return recs.reduce(function (n, w) { return n + (w.status === status ? w.bottles || 1 : 0); }, 0);
     };
     const value = recs.reduce(function (n, w) { return n + (w.price || 0) * (w.bottles || 1); }, 0);
+    const shelf = isHidden_('price', !guest) ? '**' : escH_(lookups_().settings.currency) + money_(value);
     return { text: [
       '<b>' + sum('In cellar') + '</b> in the cellar',
       '<b>' + sum('On order') + '</b> on order',
-      '<b>' + readRows_(table_('Consumed')).filter(function (r) { return !guest || !r.rec.hidden; }).length + '</b> consumed',
-      '<b>' + escH_(lookups_().settings.currency) + money_(value) + '</b> on the shelf',
+      '<b>' + consumedRecs_(guest).length + '</b> consumed',
+      '<b>' + shelf + '</b> on the shelf',
+      '',
+      'More: /stats value, collection, consumption, ratings',
     ].join('\n') };
   } },
-  // `owner` commands change the cellar or show what only the owner sees, so guests can't use them.
   // "/value consumed pinot noir" (or "opened") does the same for the bottles you've opened.
-  value: { menu: true, owner: true, help: 'What the cellar is worth, e.g. /value burgundy or /value consumed', run: function (q, recs) {
+  value: { menu: true, help: 'What the cellar is worth, e.g. /value burgundy or /value consumed', run: function (q, recs, guest) {
+    if (isHidden_('price', !guest)) return { text: 'Prices are hidden.' };
     const m = /^(consumed|opened)\b\s*([\s\S]*)$/i.exec(q);
     const search = m ? m[2] : q;
-    const list = m ? readRows_(table_('Consumed')).map(function (r) { return r.rec; }) : recs;
+    const list = m ? consumedRecs_(guest) : recs;
     return { text: valueText_(search ? searchRecs_(list, search) : list, search, !!m) };
   } },
-  notes: { menu: true, owner: true, help: 'Search your tasting notes, e.g. /notes corked', run: function (q) {
+  notes: { menu: true, help: 'Search your tasting notes, e.g. /notes corked', run: function (q, recs, guest) {
+    if (isHidden_('tastingNotes', !guest)) return { text: 'Tasting notes are hidden.' };
     if (!q) return { text: 'Type what to look for in your tasting notes, e.g. /notes corked' };
-    const opened = searchRecs_(readRows_(table_('Consumed')).map(function (r) { return r.rec; }), q, ['notes'])
+    const opened = searchRecs_(consumedRecs_(guest), q, ['notes'])
       .sort(function (a, b) { return String(b.consumedOn || '').localeCompare(String(a.consumedOn || '')); });
     if (!opened.length) return { text: 'No tasting notes match “' + escH_(q) + '”.' };
     return { text: '<b>Tasting notes with “' + escH_(q) + '”</b>\n' + opened.map(function (w) {
@@ -1461,6 +1475,223 @@ function valueText_(recs, q, opened) {
     (unpriced ? ' (' + unpriced + ' without a price, not counted)' : '');
 }
 
+const STATS_VIEWS = {
+  value: statsValue_,
+  collection: statsCollection_,
+  consumption: statsConsumption_,
+  ratings: statsRatings_,
+};
+
+// Weighted summary stats for [{ v, n, w }]: mean, median, mode(s), min, max, population std dev.
+function numStats_(items) {
+  const sorted = items.slice().sort(function (a, b) { return a.v - b.v; });
+  let count = 0, sum = 0;
+  const freq = {};
+  sorted.forEach(function (it) {
+    count += it.n;
+    sum += it.v * it.n;
+    const k = String(it.v);
+    freq[k] = (freq[k] || 0) + it.n;
+  });
+  const mean = sum / count;
+  let varianceSum = 0;
+  sorted.forEach(function (it) { varianceSum += it.n * Math.pow(it.v - mean, 2); });
+  const sd = count > 1 ? Math.sqrt(varianceSum / count) : 0;
+
+  const atPos = function (pos) {
+    let seen = 0;
+    for (let i = 0; i < sorted.length; i++) {
+      seen += sorted[i].n;
+      if (pos < seen) return sorted[i].v;
+    }
+    return sorted[sorted.length - 1].v;
+  };
+  const median = count % 2 ? atPos((count - 1) / 2) : (atPos(count / 2 - 1) + atPos(count / 2)) / 2;
+
+  let maxFreq = 0;
+  Object.keys(freq).forEach(function (k) { if (freq[k] > maxFreq) maxFreq = freq[k]; });
+  const modes = maxFreq > 1
+    ? Object.keys(freq).filter(function (k) { return freq[k] === maxFreq; }).map(Number).sort(function (a, b) { return a - b; })
+    : null;
+
+  return {
+    count: count, sum: sum, mean: mean, median: median, modes: modes, sd: sd,
+    min: sorted[0], max: sorted[sorted.length - 1],
+  };
+}
+
+function breakdownLines_(recs, field, label, limit) {
+  const counts = {};
+  let total = 0;
+  recs.forEach(function (w) {
+    const n = w.bottles || 1;
+    total += n;
+    const val = trim_(w[field] || '');
+    if (val) counts[val] = (counts[val] || 0) + n;
+  });
+  const entries = Object.keys(counts).sort(function (a, b) {
+    return counts[b] - counts[a] || a.localeCompare(b);
+  }).slice(0, limit || 6);
+  if (!entries.length) return '';
+  return '<b>' + label + '</b>\n' + entries.map(function (k) {
+    const pct = Math.round((counts[k] / total) * 100);
+    return escH_(k) + ': ' + counts[k] + ' (' + pct + '%)';
+  }).join('\n');
+}
+
+function statsValue_(search, recs, guest) {
+  if (isHidden_('price', !guest)) return 'Prices are hidden.';
+  const pool = inCellar_(recs).concat(consumedRecs_(guest));
+  const list = search ? searchRecs_(pool, search) : pool;
+  const title = '<b>Value stats' + (search ? ': “' + escH_(search) + '”' : '') + '</b>';
+  if (!list.length) return title + '\n' + (search ? 'Nothing matches “' + escH_(search) + '”.' : 'No bottles in the cellar or consumed yet.');
+  const priced = [];
+  let unpriced = 0;
+  list.forEach(function (w) {
+    const n = w.bottles || 1;
+    if (typeof w.price === 'number') priced.push({ v: w.price, n: n, w: w });
+    else unpriced += n;
+  });
+  if (!priced.length) return title + '\nNo priced bottles' + (unpriced ? ' (' + unpriced + ' without a price)' : '') + '.';
+
+  const st = numStats_(priced);
+  const cur = escH_(lookups_().settings.currency);
+  const fmt = function (v) { return cur + money_(v); };
+  const modeStr = st.modes ? st.modes.map(fmt).join(', ') : '— (all unique)';
+  const lines = [
+    title,
+    '<b>' + st.count + '</b> priced bottle' + (st.count === 1 ? '' : 's') +
+      (unpriced ? ' (+' + unpriced + ' without a price)' : '') + ' · Total <b>' + fmt(st.sum) + '</b>',
+    'Mean: <b>' + fmt(st.mean) + '</b> · Median: <b>' + fmt(st.median) + '</b> · Mode: <b>' + modeStr + '</b>',
+    'Range: ' + fmt(st.min.v) + ' – ' + fmt(st.max.v) + ' (top: ' + bottleLine_(st.max.w, true) + ')',
+  ];
+  if (st.count > 1) {
+    lines.push('Std dev (σ): <b>' + fmt(st.sd) + '</b>');
+    if (st.sd > 0) {
+      const cut1 = st.mean + st.sd;
+      const cut2 = st.mean + 2 * st.sd;
+      lines.push('Expensive (+1σ): <b>' + fmt(cut1) + '</b> · Splurge (+2σ): <b>' + fmt(cut2) + '</b>');
+      const above = priced.filter(function (it) { return it.v >= cut1; })
+        .sort(function (a, b) { return b.v - a.v; });
+      if (above.length) {
+        lines.push('\n<b>Above +1σ</b>\n' + above.slice(0, 5).map(function (it) {
+          return countLine_(it.w) + ' · ' + fmt(it.v);
+        }).join('\n'));
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
+function statsCollection_(search, recs) {
+  const list = search ? searchRecs_(recs, search) : recs;
+  const title = '<b>Collection stats' + (search ? ': “' + escH_(search) + '”' : '') + '</b>';
+  if (!list.length) return title + '\n' + (search ? 'Nothing in the cellar matches “' + escH_(search) + '”.' : 'The cellar is empty.');
+  const countStatus = function (st) {
+    return list.reduce(function (n, w) { return n + (w.status === st ? w.bottles || 1 : 0); }, 0);
+  };
+  const year = Number(today_().slice(0, 4));
+  let now = 0, hold = 0, late = 0, noWin = 0;
+  inCellar_(list).forEach(function (w) {
+    const n = w.bottles || 1;
+    const win = parseWindow_(w.window);
+    if (!win) noWin += n;
+    else if (year < win.from) hold += n;
+    else if (year > win.to) late += n;
+    else now += n;
+  });
+  const readiness = [
+    now ? now + ' drink now' : '',
+    hold ? hold + ' hold' : '',
+    late ? late + ' past window' : '',
+    noWin ? noWin + ' no window' : '',
+  ].filter(Boolean).join(' · ');
+
+  return [
+    title,
+    '<b>' + countStatus('In cellar') + '</b> in the cellar · <b>' + countStatus('On order') + '</b> on order',
+    readiness ? 'Windows: ' + readiness : '',
+    breakdownLines_(list, 'colour', 'By colour'),
+    breakdownLines_(list, 'grape', 'By grape'),
+    breakdownLines_(list, 'region', 'By region'),
+  ].filter(Boolean).join('\n\n');
+}
+
+function statsConsumption_(search, recs, guest) {
+  const all = consumedRecs_(guest);
+  const list = search ? searchRecs_(all, search) : all;
+  const title = '<b>Consumption stats' + (search ? ': “' + escH_(search) + '”' : '') + '</b>';
+  if (!list.length) return title + '\n' + (search ? 'Nothing you\'ve opened matches “' + escH_(search) + '”.' : 'You haven\'t opened anything yet.');
+  const parts = [title, '<b>' + list.length + '</b> bottle' + (list.length === 1 ? '' : 's') + ' opened'];
+
+  if (!isHidden_('price', !guest)) {
+    const priced = list.filter(function (w) { return typeof w.price === 'number'; })
+      .map(function (w) { return { v: w.price, n: 1, w: w }; });
+    if (priced.length) {
+      const st = numStats_(priced);
+      const cur = escH_(lookups_().settings.currency);
+      const fmt = function (v) { return cur + money_(v); };
+      const modeStr = st.modes ? st.modes.map(fmt).join(', ') : '— (all unique)';
+      parts.push(
+        'Spent: <b>' + fmt(st.sum) + '</b> (' + priced.length + ' priced)\n' +
+        'Mean: <b>' + fmt(st.mean) + '</b> · Median: <b>' + fmt(st.median) + '</b> · Mode: <b>' + modeStr + '</b>' +
+        (st.count > 1 ? '\nStd dev (σ): <b>' + fmt(st.sd) + '</b>' : '')
+      );
+    }
+  }
+  const byColour = breakdownLines_(list, 'colour', 'By colour');
+  const byGrape = breakdownLines_(list, 'grape', 'By grape');
+  const byRegion = breakdownLines_(list, 'region', 'By region');
+  if (byColour) parts.push(byColour);
+  if (byGrape) parts.push(byGrape);
+  if (byRegion) parts.push(byRegion);
+  return parts.join('\n\n');
+}
+
+function statsRatings_(search, recs, guest) {
+  const all = consumedRecs_(guest);
+  const list = search ? searchRecs_(all, search) : all;
+  const title = '<b>Rating stats' + (search ? ': “' + escH_(search) + '”' : '') + '</b>';
+  const rated = list.filter(function (w) {
+    return w.rating !== null && w.rating !== undefined && w.rating !== '' && !isNaN(Number(w.rating));
+  });
+  if (!rated.length) return title + '\n' + (search ? 'No rated bottles match “' + escH_(search) + '”.' : 'No rated bottles yet.');
+
+  const st = numStats_(rated.map(function (w) { return { v: Number(w.rating), n: 1, w: w }; }));
+  const modeStr = st.modes ? st.modes.map(function (v) { return v + '/10'; }).join(', ') : '— (all unique)';
+  const top = rated.slice().sort(function (a, b) {
+    return Number(b.rating) - Number(a.rating) || String(b.consumedOn || '').localeCompare(String(a.consumedOn || ''));
+  }).slice(0, 3);
+
+  const avgBy = function (field, label) {
+    const groups = {};
+    rated.forEach(function (w) {
+      const k = trim_(w[field] || '');
+      if (!k) return;
+      if (!groups[k]) groups[k] = { sum: 0, n: 0 };
+      groups[k].sum += Number(w.rating);
+      groups[k].n += 1;
+    });
+    const keys = Object.keys(groups).sort(function (a, b) {
+      return (groups[b].sum / groups[b].n) - (groups[a].sum / groups[a].n) || a.localeCompare(b);
+    }).slice(0, 5);
+    if (!keys.length) return '';
+    return '<b>' + label + '</b>\n' + keys.map(function (k) {
+      return escH_(k) + ': ' + (groups[k].sum / groups[k].n).toFixed(1) + '/10 (' + groups[k].n + ')';
+    }).join('\n');
+  };
+
+  return [
+    title,
+    '<b>' + rated.length + '</b> rated bottle' + (rated.length === 1 ? '' : 's') +
+      ' · Mean: <b>' + st.mean.toFixed(1) + '/10</b> · Median: <b>' + st.median.toFixed(1) + '/10</b> · Mode: <b>' + modeStr + '</b>',
+    '<b>Top rated</b>\n' + top.map(function (w) { return bottleLine_(w, true) + ' · <b>' + escH_(w.rating) + '/10</b>'; }).join('\n'),
+    avgBy('colour', 'By colour'),
+    avgBy('grape', 'By grape'),
+    avgBy('region', 'By region'),
+  ].filter(Boolean).join('\n\n');
+}
+
 // "<b>2018</b> Duroche · <i>Vosne-Romanée</i> ×2 · drink 2024–2035". A bottle on order never shows
 // its drinking window: it can't be opened until it arrives.
 function bottleLine_(w, short) {
@@ -1471,11 +1702,9 @@ function bottleLine_(w, short) {
 
 function inCellar_(recs) { return recs.filter(function (w) { return w.status === 'In cellar'; }); }
 
-// Guests never see hidden bottles, in lists, searches or counts.
-function cellarRecs_(guest) {
-  return sortCellar_(readRows_(table_('Cellar')).map(function (r) { return r.rec; })
-    .filter(function (w) { return !guest || !w.hidden; }));
-}
+// Guests never see hidden bottles, nor fields hidden in Settings → visibility.
+function cellarRecs_(guest) { return sortCellar_(visibleRecs_('Cellar', !guest)); }
+function consumedRecs_(guest) { return visibleRecs_('Consumed', !guest); }
 
 // The one search rule: every word must appear in one of these fields, ignoring case and accents
 // ("duroche 2018" finds "Duroché … 2018"). Notes are left out, so a note like "drinks like a

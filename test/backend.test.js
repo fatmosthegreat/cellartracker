@@ -431,7 +431,7 @@ test('the website and the bot search the same way', async () => {
   }
 });
 
-test('/notes searches only the tasting notes of opened bottles, newest first; owner-only', () => {
+test('/notes searches only the tasting notes of opened bottles, newest first; guests follow tastingNotes visibility', () => {
   const { say, sent, ok, gas } = freshBot();
   const [a, b] = ok('list').cellar.filter(w => w.status === 'In cellar');
   ok('drink', { id: a.id, drink: { consumedOn: '2026-03-01', rating: 9, notes: 'Corked, sadly' } });
@@ -445,11 +445,14 @@ test('/notes searches only the tasting notes of opened bottles, newest first; ow
   assert.match(sent(say('/notes')), /e\.g\. \/notes corked/);
 
   gas.PropertiesService.getScriptProperties().setProperties({ TELEGRAM_GUESTS: JSON.stringify([{ id: '555', name: 'Sam' }]) });
-  assert.match(sent(say('/notes corked', '555')), /Only the owner can use \/notes/);
+  assert.match(sent(say('/notes corked', '555')), /Tasting notes with “corked”/);
+  ok('visibility', { hide: ['price', 'tastingNotes'] });
+  assert.match(sent(say('/notes corked', '555')), /Tasting notes are hidden/);
   assert.doesNotMatch(sent(say('/notes corked', '555')), /Corked/);
+  assert.match(sent(say('/notes corked')), /Tasting notes with “corked”/, 'owner still sees notes');
 });
 
-test('/value lists each wine with its price and the total last; searches; owner-only', () => {
+test('/value lists each wine with its price and the total last; searches; guests follow price visibility', () => {
   const { say, sent, ok, gas } = freshBot();
   const text = sent(say('/value'));
   assert.match(text, /^<b>Cellar value<\/b>\n1x 2022 Leflaive Bourgogne Blanc · S\$150\n\n/);
@@ -479,13 +482,16 @@ test('/value lists each wine with its price and the total last; searches; owner-
   assert.match(chard, /^<b>Opened bottles: “chardonnay”<\/b>\n1x 2022 Leflaive Bourgogne Blanc · S\$150\n\n<b>Total: S\$150<\/b> · 1 bottle$/);
   assert.match(sent(say('/value consumed pinot noir')), /Nothing you've opened matches “pinot noir”/);
 
+  // Price is hidden by default: guests are refused, and allowed once price is unhidden.
   gas.PropertiesService.getScriptProperties().setProperties({ TELEGRAM_GUESTS: JSON.stringify([{ id: '555', name: 'Sam' }]) });
   const guest = sent(say('/value', '555'));
-  assert.match(guest, /Only the owner can use \/value/);
+  assert.match(guest, /Prices are hidden/);
   assert.doesNotMatch(guest, /S\$/);
+  ok('visibility', { hide: [] });
+  assert.match(sent(say('/value', '555')), /Cellar value/);
 });
 
-test('/search is off the menu but still works; /value and /notes are only on the owner menu', () => {
+test('/search is off the menu; guests see look-up commands including /value and /notes', () => {
   const { backend, gas } = freshBot();
   gas._replies.setMyCommands = () => ({ ok: true, result: true });
   backend.installTelegram();
@@ -495,7 +501,8 @@ test('/search is off the menu but still works; /value and /notes are only on the
   const mine = menus.find(m => m.payload.scope);
   assert.ok(!names(everyone).includes('search') && !names(mine).includes('search'));
   assert.ok(names(mine).includes('value') && names(mine).includes('notes'));
-  assert.ok(!names(everyone).includes('value') && !names(everyone).includes('notes'));
+  assert.ok(names(everyone).includes('value') && names(everyone).includes('notes'));
+  assert.ok(!names(everyone).includes('opened'));
 });
 
 test('bottles on order show no drinking window, and aren\'t in /ready, /closing or window reminders', () => {
@@ -519,6 +526,61 @@ test('/stats, /incoming (and the old /onorder) and /help answer', () => {
   assert.match(sent(say('/onorder')), /A F Gros/, 'the old name still works');
   assert.match(sent(say('/incoming')), /A F Gros[\s\S]*Grand Cru, collect Fri 27 Nov/);
   assert.match(sent(say('/help')), /\/opened[\s\S]*Tips[\s\S]*price 150/);
+});
+
+test('guests follow Settings visibility in /stats, /incoming, /stats subcommands', () => {
+  const { say, sent, ok, gas } = freshBot();
+  gas.PropertiesService.getScriptProperties().setProperties({ TELEGRAM_GUESTS: JSON.stringify([{ id: '555', name: 'Sam' }]) });
+  ok('visibility', { hide: ['price', 'storage', 'order'] });
+
+  assert.match(sent(say('/stats', '555')), /<b>\*\*<\/b> on the shelf/);
+  assert.match(sent(say('/stats value', '555')), /Prices are hidden/);
+  const inc = sent(say('/incoming', '555'));
+  assert.match(inc, /A F Gros/);
+  assert.doesNotMatch(inc, /Grand Cru|Collect|collect|Fri 27 Nov/);
+  const cons = sent(say('/stats consumption', '555'));
+  assert.match(cons, /<b>1<\/b> bottle opened/);
+  assert.doesNotMatch(cons, /Spent:/);
+});
+
+test('/stats subcommands: value, collection, consumption, ratings', () => {
+  const { say, sent, ok } = freshBot();
+  // Sample bottles: In cellar (150, 140, 145, 320), Consumed (88), On order (54 - ignored by /stats value).
+  const val = sent(say('/stats value'));
+  assert.match(val, /<b>Value stats<\/b>/);
+  assert.match(val, /<b>5<\/b> priced bottles · Total <b>S\$843<\/b>/);
+  assert.match(val, /Mean: <b>S\$169<\/b> · Median: <b>S\$150<\/b> · Mode: <b>— \(all unique\)<\/b>/);
+  assert.match(val, /Std dev \(σ\): <b>S\$76<\/b>/);
+  assert.match(val, /Expensive \(\+1σ\): <b>S\$244<\/b>/);
+  assert.match(val, /Above \+1σ[\s\S]*Coudray-Bizot/);
+  assert.doesNotMatch(val, /A F Gros/, 'on order is excluded from /stats value');
+
+  // Search narrows /stats value, and repeated prices produce a mode.
+  const jadot = ok('list').cellar.find(w => w.producer === 'Jadot');
+  ok('update', { id: jadot.id, wine: { bottles: 2 } });
+  const burgVal = sent(say('/stats value burgundy'));
+  assert.match(burgVal, /<b>Value stats: “burgundy”<\/b>/);
+  assert.match(burgVal, /Mode: <b>S\$140<\/b>/);
+
+  const col = sent(say('/stats collection'));
+  assert.match(col, /<b>Collection stats<\/b>/);
+  assert.match(col, /<b>5<\/b> in the cellar · <b>1<\/b> on order/);
+  assert.match(col, /By colour[\s\S]*Red:/);
+  assert.match(col, /By grape[\s\S]*Pinot Noir:/);
+  assert.match(col, /By region[\s\S]*Burgundy:/);
+
+  const cons = sent(say('/stats consumption'));
+  assert.match(cons, /<b>Consumption stats<\/b>/);
+  assert.match(cons, /<b>1<\/b> bottle opened/);
+  assert.match(cons, /Spent: <b>S\$88<\/b>/);
+
+  const penfolds = ok('list').consumed.find(w => w.producer === 'Penfolds');
+  ok('update', { id: penfolds.id, wine: { rating: 8.5 } });
+  const rat = sent(say('/stats ratings'));
+  assert.match(rat, /<b>Rating stats<\/b>/);
+  assert.match(rat, /<b>1<\/b> rated bottle · Mean: <b>8\.5\/10<\/b> · Median: <b>8\.5\/10<\/b>/);
+  assert.match(rat, /Top rated[\s\S]*Penfolds/);
+  assert.match(sent(say('/stats unknown')), /Unknown stat “unknown”/);
 });
 
 test('a long /cellar is split into messages under the Telegram limit', () => {
