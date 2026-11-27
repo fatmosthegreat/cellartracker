@@ -522,7 +522,11 @@ test('bottles on order show no drinking window, and aren\'t in /ready, /closing 
 
 test('/stats, /incoming (and the old /onorder) and /help answer', () => {
   const { say, sent } = freshBot();
-  assert.match(sent(say('/stats')), /<b>4<\/b> in the cellar\n<b>1<\/b> on order\n<b>1<\/b> consumed\n<b>S\$809<\/b> on the shelf/);
+  const st = sent(say('/stats'));
+  assert.match(st, /<b>4<\/b> in the cellar\n<b>1<\/b> on order\n<b>1<\/b> consumed\n<b>S\$809<\/b> on the shelf/);
+  assert.match(st, /Spent: <b>S\$843<\/b> \(5 priced\)/);
+  assert.match(st, /Mean: <b>S\$169<\/b> · Median: <b>S\$150<\/b>/);
+  assert.match(st, /By colour[\s\S]*By grape[\s\S]*By region/);
   assert.match(sent(say('/onorder')), /A F Gros/, 'the old name still works');
   assert.match(sent(say('/incoming')), /A F Gros[\s\S]*Grand Cru, collect Fri 27 Nov/);
   assert.match(sent(say('/help')), /\/opened[\s\S]*Tips[\s\S]*price 150/);

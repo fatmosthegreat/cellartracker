@@ -28,7 +28,7 @@ const API_VERSION = 1;
 
 // Change this whenever you change this file. status() compares it with the deployed web app's,
 // so you can tell when the web app is still running an older version.
-const BUILD = '2026-11-27.1';
+const BUILD = '2026-11-28.1';
 
 const SCHEMA = {
   Cellar: ['id', 'producer', 'wine', 'vintage', 'colour', 'grape', 'window', 'bottles', 'status',
@@ -1232,16 +1232,28 @@ const TG_COMMANDS = {
     const sum = function (status) {
       return recs.reduce(function (n, w) { return n + (w.status === status ? w.bottles || 1 : 0); }, 0);
     };
+    const consumed = consumedRecs_(guest);
     const value = recs.reduce(function (n, w) { return n + (w.price || 0) * (w.bottles || 1); }, 0);
     const shelf = isHidden_('price', !guest) ? '**' : escH_(lookups_().settings.currency) + money_(value);
-    return { text: [
+    const pool = inCellar_(recs).concat(consumed);
+    const parts = [[
       '<b>' + sum('In cellar') + '</b> in the cellar',
       '<b>' + sum('On order') + '</b> on order',
-      '<b>' + consumedRecs_(guest).length + '</b> consumed',
+      '<b>' + consumed.length + '</b> consumed',
       '<b>' + shelf + '</b> on the shelf',
-      '',
-      'More: /stats value, collection, consumption, ratings',
-    ].join('\n') };
+    ].join('\n')];
+    if (pool.length) {
+      const priceBlock = priceSummaryBlock_(pool, guest, 'Spent', true);
+      if (priceBlock) parts.push(priceBlock);
+      const byColour = breakdownLines_(pool, 'colour', 'By colour');
+      const byGrape = breakdownLines_(pool, 'grape', 'By grape');
+      const byRegion = breakdownLines_(pool, 'region', 'By region');
+      if (byColour) parts.push(byColour);
+      if (byGrape) parts.push(byGrape);
+      if (byRegion) parts.push(byRegion);
+    }
+    parts.push('More: /stats value, collection, consumption, ratings');
+    return { text: parts.join('\n\n') };
   } },
   // "/value consumed pinot noir" (or "opened") does the same for the bottles you've opened.
   value: { menu: true, help: 'What the cellar is worth, e.g. /value burgundy or /value consumed', run: function (q, recs, guest) {
@@ -1539,6 +1551,30 @@ function breakdownLines_(recs, field, label, limit) {
   }).join('\n');
 }
 
+function priceSummaryBlock_(list, guest, sumLabel, withThresholds) {
+  if (isHidden_('price', !guest)) return '';
+  const priced = [];
+  list.forEach(function (w) {
+    if (typeof w.price === 'number') priced.push({ v: w.price, n: w.bottles || 1, w: w });
+  });
+  if (!priced.length) return '';
+  const st = numStats_(priced);
+  const cur = escH_(lookups_().settings.currency);
+  const fmt = function (v) { return cur + money_(v); };
+  const modeStr = st.modes ? st.modes.map(fmt).join(', ') : '— (all unique)';
+  const lines = [
+    sumLabel + ': <b>' + fmt(st.sum) + '</b> (' + st.count + ' priced)',
+    'Mean: <b>' + fmt(st.mean) + '</b> · Median: <b>' + fmt(st.median) + '</b> · Mode: <b>' + modeStr + '</b>',
+  ];
+  if (st.count > 1) {
+    lines.push('Std dev (σ): <b>' + fmt(st.sd) + '</b>');
+    if (withThresholds && st.sd > 0) {
+      lines.push('Expensive (+1σ): <b>' + fmt(st.mean + st.sd) + '</b> · Splurge (+2σ): <b>' + fmt(st.mean + 2 * st.sd) + '</b>');
+    }
+  }
+  return lines.join('\n');
+}
+
 function statsValue_(search, recs, guest) {
   if (isHidden_('price', !guest)) return 'Prices are hidden.';
   const pool = inCellar_(recs).concat(consumedRecs_(guest));
@@ -1624,21 +1660,8 @@ function statsConsumption_(search, recs, guest) {
   if (!list.length) return title + '\n' + (search ? 'Nothing you\'ve opened matches “' + escH_(search) + '”.' : 'You haven\'t opened anything yet.');
   const parts = [title, '<b>' + list.length + '</b> bottle' + (list.length === 1 ? '' : 's') + ' opened'];
 
-  if (!isHidden_('price', !guest)) {
-    const priced = list.filter(function (w) { return typeof w.price === 'number'; })
-      .map(function (w) { return { v: w.price, n: 1, w: w }; });
-    if (priced.length) {
-      const st = numStats_(priced);
-      const cur = escH_(lookups_().settings.currency);
-      const fmt = function (v) { return cur + money_(v); };
-      const modeStr = st.modes ? st.modes.map(fmt).join(', ') : '— (all unique)';
-      parts.push(
-        'Spent: <b>' + fmt(st.sum) + '</b> (' + priced.length + ' priced)\n' +
-        'Mean: <b>' + fmt(st.mean) + '</b> · Median: <b>' + fmt(st.median) + '</b> · Mode: <b>' + modeStr + '</b>' +
-        (st.count > 1 ? '\nStd dev (σ): <b>' + fmt(st.sd) + '</b>' : '')
-      );
-    }
-  }
+  const priceBlock = priceSummaryBlock_(list, guest, 'Spent', false);
+  if (priceBlock) parts.push(priceBlock);
   const byColour = breakdownLines_(list, 'colour', 'By colour');
   const byGrape = breakdownLines_(list, 'grape', 'By grape');
   const byRegion = breakdownLines_(list, 'region', 'By region');
